@@ -46,7 +46,7 @@ export async function authenticate(c: Ctx, next: () => Promise<void>) {
   const hash = await sha(token);
   const s = await one<Principal & { csrf_hash: string }>(
     c.env,
-    `SELECT s.id_hash AS sessionHash,s.user_id AS userId,s.workspace_id AS workspaceId,m.role,u.email,u.name,w.name AS workspaceName,s.csrf_hash,s.created_at AS createdAt,s.expires_at AS expiresAt FROM sessions s JOIN users u ON u.id=s.user_id JOIN workspace_members m ON m.user_id=s.user_id AND m.workspace_id=s.workspace_id JOIN workspaces w ON w.id=s.workspace_id WHERE s.id_hash=? AND s.expires_at>? AND s.idle_expires_at>? AND u.disabled=0`,
+    `SELECT s.id_hash AS sessionHash,s.family_id AS familyId,s.user_id AS userId,s.workspace_id AS workspaceId,m.role,u.email,u.name,w.name AS workspaceName,s.csrf_hash,s.created_at AS createdAt,s.expires_at AS expiresAt FROM sessions s JOIN users u ON u.id=s.user_id JOIN workspace_members m ON m.user_id=s.user_id AND m.workspace_id=s.workspace_id JOIN workspaces w ON w.id=s.workspace_id WHERE s.id_hash=? AND s.expires_at>? AND s.idle_expires_at>? AND u.disabled=0`,
     hash,
     now(),
     now(),
@@ -71,6 +71,7 @@ async function newSession(
   createdAt = now(),
   expires = after(8 * 3600),
   oldHash?: string,
+  familyId = id(),
 ) {
   const token = randomToken(),
     hash = await sha(token),
@@ -78,7 +79,7 @@ async function newSession(
     t = now();
   const insert = statement(
     c.env,
-    "INSERT INTO sessions(id_hash,user_id,workspace_id,csrf_hash,created_at,expires_at,idle_expires_at,rotated_at) VALUES(?,?,?,?,?,?,?,?)",
+    `INSERT INTO sessions(id_hash,user_id,workspace_id,csrf_hash,created_at,expires_at,idle_expires_at,rotated_at,family_id) SELECT ?,?,?,?,?,?,?,?,? ${oldHash ? "WHERE EXISTS(SELECT 1 FROM sessions WHERE id_hash=? AND workspace_id=? AND expires_at>? AND idle_expires_at>?)" : ""}`,
     hash,
     userId,
     workspaceId,
@@ -87,17 +88,26 @@ async function newSession(
     expires,
     after(3600),
     t,
+    familyId,
+    ...(oldHash ? [oldHash, workspaceId, t, t] : []),
   );
   if (oldHash) {
-    await c.env.DB.batch([
+    const result = await c.env.DB.batch([
       insert,
       statement(
         c.env,
-        "DELETE FROM sessions WHERE id_hash=? AND workspace_id=?",
+        "UPDATE sessions SET idle_expires_at=MIN(idle_expires_at,?) WHERE id_hash=? AND workspace_id=?",
+        after(30),
         oldHash,
         workspaceId,
       ),
     ]);
+    if (!result[0].meta.changes)
+      throw new ApiError(
+        401,
+        "session_expired",
+        "Your session expired. Sign in again.",
+      );
   } else await insert.run();
   cookie(
     c,
@@ -219,7 +229,7 @@ authRoutes.post("/login", async (c) => {
       typeof b.password === "string" && b.password.length <= 128
         ? b.password
         : "";
-  const accountLimit=await limit(c, `login-account:${mail}`, 5, 900);
+  const accountLimit = await limit(c, `login-account:${mail}`, 5, 900);
   const u = await one<{
     id: string;
     password_hash: string;
@@ -248,7 +258,11 @@ authRoutes.post("/login", async (c) => {
     throw new ApiError(401, "invalid_login", "Email or password is incorrect.");
   }
   const csrf = await newSession(c, u.id, u.workspace_id);
-  await statement(c.env,'DELETE FROM auth_limits WHERE key_hash=?',accountLimit).run();
+  await statement(
+    c.env,
+    "DELETE FROM auth_limits WHERE key_hash=?",
+    accountLimit,
+  ).run();
   await audit(
     c.env,
     { userId: u.id, workspaceId: u.workspace_id },
@@ -282,6 +296,7 @@ authRoutes.post("/rotate", async (c) => {
     a.createdAt,
     a.expiresAt,
     a.sessionHash,
+    a.familyId,
   );
   return c.json({ ok: true, data: { csrf } });
 });
@@ -290,9 +305,15 @@ authRoutes.post("/logout", async (c) => {
   await c.env.DB.batch([
     statement(
       c.env,
-      "DELETE FROM sessions WHERE id_hash=? AND workspace_id=?",
-      a.sessionHash,
+      "DELETE FROM sessions WHERE family_id=? AND workspace_id=?",
+      a.familyId,
       a.workspaceId,
+    ),
+    statement(
+      c.env,
+      "DELETE FROM oauth_states WHERE workspace_id=? AND session_family=?",
+      a.workspaceId,
+      a.familyId,
     ),
     audit(c.env, a, "auth.logout", a.userId),
   ]);

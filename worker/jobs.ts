@@ -59,11 +59,11 @@ export function enqueueStatement(
     ),
   };
 }
-export async function signalJobs(env: Env, ids: string[],delaySeconds=0) {
+export async function signalJobs(env: Env, ids: string[], delaySeconds = 0) {
   if (!env.INGEST_QUEUE) return;
   for (const jid of ids) {
     try {
-      await env.INGEST_QUEUE.send({ jobId: jid },{delaySeconds});
+      await env.INGEST_QUEUE.send({ jobId: jid }, { delaySeconds });
     } catch {
       /* D1 is the durable source of truth. Cron will retry delivery/work. */
     }
@@ -75,7 +75,7 @@ export async function saveLead(
   page: string,
   form: string,
   data: MetaLead,
-  jobContext?:{id:string;lease:string},
+  jobContext?: { id: string; lease: string },
 ) {
   if (
     !/^\d+$/.test(data.id) ||
@@ -92,10 +92,29 @@ export async function saveLead(
     page,
   );
   if (!selected) return false;
-  if(data.field_data.length>100||data.field_data.some(v=>!v||typeof v.name!=='string'||v.name.length>200||!Array.isArray(v.values)||v.values.some(x=>typeof x!=='string')))throw new GraphError('invalid_field_data',false);
-  const fields=data.field_data.map(v=>({name:v.name,values:[...v.values]}));
-  if(data.custom_disclaimer_responses?.length)fields.push({name:'custom_disclaimer_responses',values:data.custom_disclaimer_responses.map(v=>JSON.stringify(v))});
-  if(new TextEncoder().encode(JSON.stringify(fields)).length>500000)throw new GraphError('lead_answers_too_large',false);
+  if (
+    data.field_data.length > 100 ||
+    data.field_data.some(
+      (v) =>
+        !v ||
+        typeof v.name !== "string" ||
+        v.name.length > 200 ||
+        !Array.isArray(v.values) ||
+        v.values.some((x) => typeof x !== "string"),
+    )
+  )
+    throw new GraphError("invalid_field_data", false);
+  const fields = data.field_data.map((v) => ({
+    name: v.name,
+    values: [...v.values],
+  }));
+  if (data.custom_disclaimer_responses?.length)
+    fields.push({
+      name: "custom_disclaimer_responses",
+      values: data.custom_disclaimer_responses.map((v) => JSON.stringify(v)),
+    });
+  if (new TextEncoder().encode(JSON.stringify(fields)).length > 500000)
+    throw new GraphError("lead_answers_too_large", false);
   const val = (key: string) =>
     fields.find((v) => v.name === key)?.values.join(", ") || "";
   const name =
@@ -135,8 +154,8 @@ export async function saveLead(
       JSON.stringify({
         ad_id: data.ad_id || null,
         campaign_id: data.campaign_id || null,
-        ad_name:data.ad_name||null,
-        platform:data.platform||null,
+        ad_name: data.ad_name || null,
+        platform: data.platform || null,
         is_organic: data.is_organic ?? null,
       }),
       t,
@@ -148,7 +167,17 @@ export async function saveLead(
       form,
       page,
     ),
-    ...(jobContext?[statement(env,"UPDATE sync_jobs SET imported=imported+changes() WHERE workspace_id=? AND id=? AND lease_token=? AND status='running'",workspace,jobContext.id,jobContext.lease)]:[]),
+    ...(jobContext
+      ? [
+          statement(
+            env,
+            "UPDATE sync_jobs SET imported=imported+changes() WHERE workspace_id=? AND id=? AND lease_token=? AND status='running'",
+            workspace,
+            jobContext.id,
+            jobContext.lease,
+          ),
+        ]
+      : []),
     ...fields.map((f) =>
       statement(
         env,
@@ -234,7 +263,10 @@ export async function processJob(env: Env, jobId: string) {
       });
       if (data.id !== job.lead_id)
         throw new GraphError("lead_identity_mismatch", false);
-      await saveLead(env,job.workspace_id,job.page_id,job.form_id!,data,{id:job.id,lease});
+      await saveLead(env, job.workspace_id, job.page_id, job.form_id!, data, {
+        id: job.id,
+        lease,
+      });
     } else {
       const result = await fetchLeads<GraphList<MetaLead>>(
         env,
@@ -259,7 +291,11 @@ export async function processJob(env: Env, jobId: string) {
       );
       if (!Array.isArray(result.data))
         throw new GraphError("invalid_page", true);
-      for (const data of result.data)await saveLead(env,job.workspace_id,job.page_id,job.form_id!,data,{id:job.id,lease});
+      for (const data of result.data)
+        await saveLead(env, job.workspace_id, job.page_id, job.form_id!, data, {
+          id: job.id,
+          lease,
+        });
       if (result.paging?.next) {
         next = result.paging.cursors?.after || null;
         if (!next || next === job.cursor)
@@ -311,7 +347,7 @@ export async function processJob(env: Env, jobId: string) {
           ]
         : []),
     ]);
-    if(next)await signalJobs(env,[job.id],15);
+    if (next) await signalJobs(env, [job.id], 15);
   } catch (error) {
     const e =
         error instanceof GraphError
@@ -363,7 +399,12 @@ export async function processJob(env: Env, jobId: string) {
           ]
         : []),
     ]);
-    if(!dead)await signalJobs(env,[job.id],retryDelay(job.attempts,e.retryAfter)+5);
+    if (!dead)
+      await signalJobs(
+        env,
+        [job.id],
+        retryDelay(job.attempts, e.retryAfter) + 5,
+      );
   }
 }
 export async function runDue(env: Env) {
@@ -375,7 +416,11 @@ export async function runDue(env: Env) {
     now(),
     queueLimit,
   );
-  if(env.INGEST_QUEUE) await signalJobs(env,jobs.map(j=>j.id));
+  if (env.INGEST_QUEUE)
+    await signalJobs(
+      env,
+      jobs.map((j) => j.id),
+    );
   else for (const job of jobs) await processJob(env, job.id);
 }
 export async function maintenance(env: Env) {
@@ -397,7 +442,10 @@ export async function maintenance(env: Env) {
       env,
       "DELETE FROM sync_jobs WHERE status IN('complete','cancelled') AND updated_at<strftime('%Y-%m-%dT%H:%M:%fZ','now','-30 days')",
     ),
-    statement(env,"DELETE FROM webhook_inbox WHERE status='complete' AND updated_at<strftime('%Y-%m-%dT%H:%M:%fZ','now','-7 days')"),
+    statement(
+      env,
+      "DELETE FROM webhook_inbox WHERE status='complete' AND updated_at<strftime('%Y-%m-%dT%H:%M:%fZ','now','-7 days')",
+    ),
   ]);
   // Index-bounded, limited retention work: deletion cascades answers, notes, tasks.
   const expired = await rows<{

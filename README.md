@@ -1,43 +1,60 @@
 # AZ Leads CRM
 
-A responsive React + TypeScript frontend for Facebook Instant Form leads. The repository was empty when implementation began; Vite supplies the development and production build pipeline.
+React 19 + TypeScript + Vite frontend, Hono/Cloudflare Worker API, D1 database, and optional Cloudflare Queues. The navy/blue dashboard now defaults to authenticated database-backed mode. The fictional frontend is isolated at `/?mode=demo`; live mode never falls back to it.
 
-## Run locally
+**Status:** implemented and locally tested; production deployment, Meta app approval/authorization, and a real lead round trip require external configuration. No hosted URL or successful Facebook connection is claimed.
 
-Requires Node.js 22.12+ (or 20.19+) and npm.
+## Features
+
+- One-time Owner provisioning; password login, HttpOnly server sessions, CSRF, rotation, lockouts, role authorization and audit events.
+- Workspace-owned leads, all custom answers, separate submission identity, possible repeat-contact hints, notes, activities, assignments, follow-ups, contact-app links and persistent stages.
+- Search by person/contact/campaign/form/Page, date/stage/form/Page/agent filters, server pagination/sorting, bounded matching CSV export, actual database analytics and five-minute in-app notifications.
+- Server Meta OAuth/state/permission/expiration checks, encrypted Page/user tokens, Page selection and confirmed leadgen subscription, real form discovery/selection, disconnect/reconnect and actionable diagnostics.
+- Raw-body signed webhook verification and durable inbox acknowledgement; separately retrieved full lead records; idempotent imports, cursor pagination, exponential retry, dead-letter/replay, lease recovery and incremental reconciliation.
+- Connection/job health, Sync Now, team access, account password changes and workspace retention. No automated outbound messaging or paid notification provider.
+
+## Start
+
+Use Node.js 24 and npm. Copy `.dev.vars.example` to ignored `.dev.vars` and fill the required local server secrets as described in the deployment guide.
 
 ```sh
 npm ci
-npm run dev
-npm run test
+npm run db:local
+npm test
+npm run worker:check
 npm run build
-npm run preview
+npm run worker:dev
 ```
 
-The production static files are written to `dist/`. Host those files on any static host. No deployment is provisioned by this repository. Root-path hosting is the default; configure Vite's `base` before deploying under a subdirectory such as GitHub Pages.
+Open `http://localhost:8787`. Provision the Owner once using `/api/auth/bootstrap`; no default login exists. The optional `npm run dev` frontend at `http://127.0.0.1:5173` proxies API requests to the running Worker. Built assets are in `dist/`; deploy the frontend and Worker together for secure same-origin cookies. Static-only hosting supports the isolated demo but cannot run the CRM backend.
 
-## Implemented
+## Repository map
 
-- Dark navy/blue responsive dashboard, sidebar, mobile navigation and keyboard focus styles.
-- Overview KPIs, daily activity chart and clickable status pipeline, all calculated from the same 24 fictional leads.
-- Leads table with combined text, status, form and inclusive UTC date filters, pagination and empty states.
-- Accessible native lead detail dialog with contact information, campaign, custom form answers, editable status and notes.
-- Form summaries, form-filtered lead navigation, form conversion analytics and honest connection settings.
-- CSV export of the current filtered dataset, with quote escaping and spreadsheet formula mitigation.
-- Browser-local persistence for demo status and notes, storage failure feedback, and demo reset.
+| Path                                           | Responsibility                                                                                   |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `src/main.tsx`, `src/api.ts`                   | Authenticated entry, session lifecycle, in-memory CSRF/API client                                |
+| `src/pages/`, `src/components/`, `src/hooks/`  | Reusable CRM views, accessible detail dialog, states and fetching                                |
+| `src/demo/DemoApp.tsx`, `src/data.ts`          | Explicit fictional demo and its browser-only data; never a live source                           |
+| `shared/contracts.ts`                          | Shared roles, stages and API data types                                                          |
+| `worker/auth.ts`, `crypto.ts`                  | Provisioning, passwords, cookies/sessions, HMAC and authenticated token encryption               |
+| `worker/crm.ts`, `filters.ts`                  | Workspace APIs, validation, SQL filters, analytics and export                                    |
+| `worker/meta.ts`, `meta-client.ts`             | OAuth, Page/form management, token checks, official Graph requests                               |
+| `worker/webhooks.ts`, `inbox.ts`, `jobs.ts`    | Signed durable ingestion, retries, pagination, reconciliation and retention                      |
+| `migrations/0001_core.sql`                     | Users, sessions, workspaces, Meta connections, Pages/forms, leads/answers/notes/activities/tasks |
+| `migrations/0002_ingestion.sql`                | Webhook events, sync jobs, suppression tombstones, notification read markers                     |
+| `migrations/0003_reconciliation.sql`           | Incremental checkpoints and operational indexes                                                  |
+| `migrations/0004_webhook_inbox.sql`            | Durable, bounded-dispatch signed webhook inbox                                                   |
+| `migrations/0005_session_rotation.sql`         | Session families and OAuth state continuity through safe rotation                                |
+| `wrangler.jsonc`, `.dev.vars.example`          | Local/production bindings and safe secret examples                                               |
+| `worker/security.test.ts`, `worker/test-db.ts` | Mocked Meta + actual SQLite schema/API/security tests                                            |
+| `scripts/smoke-local.mjs`                      | Disposable local-only Worker/D1 API verification                                                 |
 
-## Demo limitations
+## Guides
 
-All people, contact details, forms and metrics are fictional. Demo submissions span 25 October–1 November 2026. There is no backend, authentication, actual Facebook connection, live syncing or secure shared database. Notes and statuses are stored in localStorage on this browser only. Do not enter real personal or sensitive information. The connect control is deliberately disabled until backend integration exists. Reset restores the initial statuses and removes demo notes. CSV export includes notes but does not flatten arbitrary custom form answers.
+- [Audit of the original repository](docs/AUDIT.md)
+- [Deployment, Cloudflare commands and exact Meta setup](docs/DEPLOYMENT.md)
+- [Endpoint catalog and filtering semantics](docs/API.md)
+- [Security controls, recovery and privacy operations](docs/SECURITY.md)
+- [Verification results and limitations](VERIFICATION.md)
 
-Fonts use Google Fonts with local sans-serif fallbacks; no other external resources are needed by the runtime. Icons are bundled from lucide-react.
-
-## Integration boundary
-
-`src/data.ts` owns the typed lead model, fictional seed, pure filtering and export functions. `src/main.tsx` initializes the demo state and contains the views. Replace `readLeads()` and local state persistence with an authenticated API client when adding the backend. Keep the mock/connection labels until real connection state is returned by the server. Custom answers are represented as question/answer pairs rather than a fixed form schema.
-
-Suggested backend responsibilities: administrator authentication and authorization; server-side Meta Page authorization and token storage; webhook verification and signature validation; lead retrieval and deduplication; durable lead/form storage; retry processing; authenticated list/detail/status/notes endpoints; and actual connection/last-sync status. Never place Meta access tokens or app secrets in Vite environment variables or browser storage. Meta configuration and permission requirements must be verified against current official documentation during backend implementation.
-
-## Verification
-
-`npm test` covers combined filters, date bounds, campaign search, CSV scoping, escaping and formula handling. `npm run build` type-checks the frontend before creating production assets. Browser QA should cover desktop/mobile layout, keyboard dialog dismissal and focus return, navigation, filters, pagination, status/notes persistence and export.
+No app IDs, database UUIDs, production origins or secrets are fabricated. Production binding values are deliberately empty until configured. D1+Cron mode needs no Queue binding but is intentionally low-throughput; Queues is recommended for timely delivery and history imports. Availability windows, App Review and free-tier quotas are provider constraints, not promises made by this application.

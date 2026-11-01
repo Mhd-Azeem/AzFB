@@ -53,22 +53,26 @@ async function refreshForms(
         "More than 1,000 forms are available. Narrow the Page setup before continuing.",
       );
   }
-  const t = now();
+  const t = now(),
+    updates: D1PreparedStatement[] = [];
   for (const form of all) {
     externalId(form.id);
-    await statement(
-      env,
-      `INSERT INTO instant_forms(workspace_id,id,page_id,name,status,questions_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id,id) DO UPDATE SET name=excluded.name,status=excluded.status,questions_json=excluded.questions_json,updated_at=excluded.updated_at`,
-      workspace,
-      form.id,
-      pageId,
-      form.name,
-      form.status || "UNKNOWN",
-      JSON.stringify(form.questions || []),
-      t,
-      t,
-    ).run();
+    updates.push(
+      statement(
+        env,
+        `INSERT INTO instant_forms(workspace_id,id,page_id,name,status,questions_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id,id) DO UPDATE SET name=excluded.name,status=excluded.status,questions_json=excluded.questions_json,updated_at=excluded.updated_at`,
+        workspace,
+        form.id,
+        pageId,
+        form.name,
+        form.status || "UNKNOWN",
+        JSON.stringify(form.questions || []),
+        t,
+        t,
+      ),
+    );
   }
+  if (updates.length) await env.DB.batch(updates);
   return all;
 }
 metaRoutes.get("/connect", async (c) => {
@@ -84,9 +88,9 @@ metaRoutes.get("/connect", async (c) => {
     state = randomToken();
   await statement(
     c.env,
-    "INSERT INTO oauth_states(state_hash,session_hash,workspace_id,expires_at) VALUES(?,?,?,?)",
+    "INSERT INTO oauth_states(state_hash,session_family,workspace_id,expires_at) VALUES(?,?,?,?)",
     await sha(state),
-    a.sessionHash,
+    a.familyId,
     a.workspaceId,
     after(600),
   ).run();
@@ -99,7 +103,9 @@ metaRoutes.get("/connect", async (c) => {
     state,
     response_type: "code",
     scope: scopes.join(","),
-      ...(c.env.META_LOGIN_CONFIG_ID?{config_id:c.env.META_LOGIN_CONFIG_ID}:{}),
+    ...(c.env.META_LOGIN_CONFIG_ID
+      ? { config_id: c.env.META_LOGIN_CONFIG_ID }
+      : {}),
     auth_type: "rerequest",
   }).forEach(([k, v]) => url.searchParams.set(k, v));
   return c.json({ ok: true, data: { url: url.toString() } });
@@ -117,10 +123,10 @@ metaRoutes.get("/callback", async (c) => {
     );
   const consumed = await statement(
     c.env,
-    "DELETE FROM oauth_states WHERE state_hash=? AND workspace_id=? AND session_hash=? AND expires_at>? RETURNING state_hash",
+    "DELETE FROM oauth_states WHERE state_hash=? AND workspace_id=? AND session_family=? AND expires_at>? RETURNING state_hash",
     await sha(state),
     a.workspaceId,
-    a.sessionHash,
+    a.familyId,
     now(),
   ).first();
   if (!consumed)
@@ -192,25 +198,29 @@ metaRoutes.get("/callback", async (c) => {
         ...(cursor ? { after: cursor } : {}),
       },
     );
+    const pageUpdates: D1PreparedStatement[] = [];
     for (const p of result.data) {
       externalId(p.id);
       if (!p.access_token) continue;
-      await statement(
-        c.env,
-        `INSERT INTO facebook_pages(workspace_id,id,name,token_encrypted,tasks_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(workspace_id,id) DO UPDATE SET name=excluded.name,token_encrypted=excluded.token_encrypted,tasks_json=excluded.tasks_json,last_error=NULL,updated_at=excluded.updated_at`,
-        a.workspaceId,
-        p.id,
-        p.name,
-        await encrypt(
-          c.env.TOKEN_ENCRYPTION_KEY,
-          p.access_token,
-          `${a.workspaceId}:page:${p.id}`,
+      pageUpdates.push(
+        statement(
+          c.env,
+          `INSERT INTO facebook_pages(workspace_id,id,name,token_encrypted,tasks_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(workspace_id,id) DO UPDATE SET name=excluded.name,token_encrypted=excluded.token_encrypted,tasks_json=excluded.tasks_json,last_error=NULL,updated_at=excluded.updated_at`,
+          a.workspaceId,
+          p.id,
+          p.name,
+          await encrypt(
+            c.env.TOKEN_ENCRYPTION_KEY,
+            p.access_token,
+            `${a.workspaceId}:page:${p.id}`,
+          ),
+          JSON.stringify(p.tasks || []),
+          t,
+          t,
         ),
-        JSON.stringify(p.tasks || []),
-        t,
-        t,
-      ).run();
+      );
     }
+    if (pageUpdates.length) await c.env.DB.batch(pageUpdates);
     if (!result.paging?.next) break;
     const next = result.paging.cursors?.after;
     if (!next || next === cursor)
@@ -470,8 +480,26 @@ metaRoutes.get("/connection-status", async (c) => {
         ? `${c.env.APP_ORIGIN}/api/webhooks/meta`
         : null,
       requiredScopes: scopes,
-      connection:connection&&typeof connection.token_expires_at==='string'&&connection.token_expires_at<=now()?{...connection,status:'needs_reauth',last_error:'Facebook token access has expired. Reconnect Facebook.'}:connection,
-      pages:pages.map(p=>typeof p.token_expires_at==='string'&&p.token_expires_at<=now()?{...p,authorized:0,last_error:'Page token access has expired. Reconnect Facebook.'}:p),
+      connection:
+        connection &&
+        typeof connection.token_expires_at === "string" &&
+        connection.token_expires_at <= now()
+          ? {
+              ...connection,
+              status: "needs_reauth",
+              last_error:
+                "Facebook token access has expired. Reconnect Facebook.",
+            }
+          : connection,
+      pages: pages.map((p) =>
+        typeof p.token_expires_at === "string" && p.token_expires_at <= now()
+          ? {
+              ...p,
+              authorized: 0,
+              last_error: "Page token access has expired. Reconnect Facebook.",
+            }
+          : p,
+      ),
       health,
       delivery: c.env.INGEST_QUEUE ? "queue-and-d1" : "d1-cron",
     },

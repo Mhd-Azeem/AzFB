@@ -3,7 +3,7 @@ import type { Role } from "../shared/contracts";
 export interface Env {
   DB: D1Database;
   ASSETS: Fetcher;
-  INGEST_QUEUE?: Queue<{ jobId?: string; inboxId?:string }>;
+  INGEST_QUEUE?: Queue<{ jobId?: string; inboxId?: string }>;
   ENVIRONMENT: "local" | "production";
   APP_ORIGIN: string;
   ALLOWED_ORIGINS: string;
@@ -11,7 +11,7 @@ export interface Env {
   TOKEN_ENCRYPTION_KEY: string;
   BOOTSTRAP_SECRET?: string;
   META_APP_ID?: string;
-  META_LOGIN_CONFIG_ID?:string;
+  META_LOGIN_CONFIG_ID?: string;
   META_APP_SECRET?: string;
   META_WEBHOOK_VERIFY_TOKEN?: string;
   META_GRAPH_VERSION?: string;
@@ -24,6 +24,7 @@ export interface Principal {
   name: string;
   workspaceName: string;
   sessionHash: string;
+  familyId: string;
   csrf: string;
   createdAt: string;
   expiresAt: string;

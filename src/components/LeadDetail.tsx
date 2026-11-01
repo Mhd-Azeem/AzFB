@@ -251,7 +251,17 @@ export function LeadDetail({
               d.activities.map((a) => (
                 <article className="note" key={a.id}>
                   <strong>{a.kind}</strong>
-                  <p>{(()=>{if(a.kind!=='updated')return a.detail;try{const change=JSON.parse(a.detail);return `Stage: ${change.status}. Assigned to ${members.data?.find(m=>m.id===change.assignedTo)?.name||'no agent'}.`;}catch{return 'Lead updated.';}})()}</p>
+                  <p>
+                    {(() => {
+                      if (a.kind !== "updated") return a.detail;
+                      try {
+                        const change = JSON.parse(a.detail);
+                        return `Stage: ${change.status}. Assigned to ${members.data?.find((m) => m.id === change.assignedTo)?.name || "no agent"}.`;
+                      } catch {
+                        return "Lead updated.";
+                      }
+                    })()}
+                  </p>
                   <small>
                     {a.actor_name || "Meta ingestion"} ·{" "}
                     {dateTime(a.created_at)}

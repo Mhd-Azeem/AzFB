@@ -420,12 +420,16 @@ crmRoutes.post("/tasks", async (c) => {
   const title = text(b.title, "task title", 200),
     due = iso(b.dueAt),
     priority = choice(
-      'priority' in b ? b.priority : "Normal",
+      "priority" in b ? b.priority : "Normal",
       ["Low", "Normal", "High"],
       "priority",
     ),
-    lid = 'leadId' in b && b.leadId!==null ? text(b.leadId, "lead", 100) : null,
-    assignee = 'assignedTo' in b && b.assignedTo!==null ? text(b.assignedTo, "assignee", 100) : a.userId;
+    lid =
+      "leadId" in b && b.leadId !== null ? text(b.leadId, "lead", 100) : null,
+    assignee =
+      "assignedTo" in b && b.assignedTo !== null
+        ? text(b.assignedTo, "assignee", 100)
+        : a.userId;
   if (a.role === "Agent" && assignee !== a.userId)
     throw new ApiError(
       403,

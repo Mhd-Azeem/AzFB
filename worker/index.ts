@@ -8,9 +8,9 @@ import { metaRoutes } from "./meta";
 import { webhooks } from "./webhooks";
 import { GraphError } from "./meta-client";
 import { maintenance, processJob } from "./jobs";
-import { dispatchInbox } from './inbox';
-import { rows } from './db';
-import { now } from './types';
+import { dispatchInbox } from "./inbox";
+import { rows } from "./db";
+import { now } from "./types";
 const app = new Hono<Bindings>();
 app.use("*", async (c, next) => {
   c.set("requestId", id());
@@ -158,12 +158,26 @@ export default {
     env: Env,
     ctx: ExecutionContext,
   ) {
-    ctx.waitUntil((async()=>{const pending=await rows<{id:string}>(env,"SELECT id FROM webhook_inbox WHERE status='pending' OR (status='running' AND lease_until<?) ORDER BY updated_at LIMIT 1",now());for(const inbox of pending)await dispatchInbox(env,inbox.id);await maintenance(env);})());
+    ctx.waitUntil(
+      (async () => {
+        const pending = await rows<{ id: string }>(
+          env,
+          "SELECT id FROM webhook_inbox WHERE status='pending' OR (status='running' AND lease_until<?) ORDER BY updated_at LIMIT 1",
+          now(),
+        );
+        for (const inbox of pending) await dispatchInbox(env, inbox.id);
+        await maintenance(env);
+      })(),
+    );
   },
-  async queue(batch: MessageBatch<{ jobId?: string; inboxId?:string }>, env: Env) {
+  async queue(
+    batch: MessageBatch<{ jobId?: string; inboxId?: string }>,
+    env: Env,
+  ) {
     for (const message of batch.messages) {
       try {
-        if(typeof message.body?.inboxId==='string')await dispatchInbox(env,message.body.inboxId);
+        if (typeof message.body?.inboxId === "string")
+          await dispatchInbox(env, message.body.inboxId);
         else if (typeof message.body?.jobId === "string")
           await processJob(env, message.body.jobId);
         message.ack();

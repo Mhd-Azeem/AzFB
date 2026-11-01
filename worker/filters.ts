@@ -8,10 +8,15 @@ export function leadFilter(params: URLSearchParams, workspace: string) {
     if (q.length > 200)
       throw new ApiError(400, "validation", "Search is too long.");
     clauses.push(
-      `(l.name LIKE ? ESCAPE '\' OR l.email LIKE ? ESCAPE '\' OR l.phone LIKE ? ESCAPE '\' OR l.campaign LIKE ? ESCAPE '\' OR f.name LIKE ? ESCAPE '\' OR p.name LIKE ? ESCAPE '\' OR l.lead_id LIKE ? ESCAPE '\')`,
+      `(l.name LIKE ? ESCAPE '!' OR l.email LIKE ? ESCAPE '!' OR l.phone LIKE ? ESCAPE '!' OR l.campaign LIKE ? ESCAPE '!' OR f.name LIKE ? ESCAPE '!' OR p.name LIKE ? ESCAPE '!' OR l.lead_id LIKE ? ESCAPE '!')`,
     );
-    const term = `%${q.replace(/[\\%_]/g, "\\$&")}%`;
-    if(new TextEncoder().encode(term).length>50)throw new ApiError(400,'validation','Search is too long for the database. Use a shorter name, email fragment, phone or campaign.');
+    const term = `%${q.replace(/[!%_]/g, "!$&")}%`;
+    if (new TextEncoder().encode(term).length > 50)
+      throw new ApiError(
+        400,
+        "validation",
+        "Search is too long for the database. Use a shorter name, email fragment, phone or campaign.",
+      );
     args.push(...Array(7).fill(term));
   }
   for (const [key, col] of [

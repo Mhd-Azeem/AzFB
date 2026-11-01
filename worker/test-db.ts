@@ -7,7 +7,9 @@ export function testDatabase() {
   for (const file of [
     "0001_core.sql",
     "0002_ingestion.sql",
-    "0003_reconciliation.sql", "0004_webhook_inbox.sql",
+    "0003_reconciliation.sql",
+    "0004_webhook_inbox.sql",
+    "0005_session_rotation.sql",
   ])
     sqlite.exec(
       readFileSync(new URL(`../migrations/${file}`, import.meta.url), "utf8"),

@@ -8,7 +8,15 @@ export const scopes = [
   "leads_retrieval",
 ];
 export function metaConfigured(e: Env) {
-  try {if(atob(e.TOKEN_ENCRYPTION_KEY||'').length!==32||new URL(e.APP_ORIGIN).origin!==e.APP_ORIGIN)return false;}catch{return false;}
+  try {
+    if (
+      atob(e.TOKEN_ENCRYPTION_KEY || "").length !== 32 ||
+      new URL(e.APP_ORIGIN).origin !== e.APP_ORIGIN
+    )
+      return false;
+  } catch {
+    return false;
+  }
   return Boolean(
     e.META_APP_ID &&
     e.META_APP_SECRET &&
@@ -186,10 +194,25 @@ export interface MetaLead {
   campaign_name?: string;
   ad_name?: string;
   is_organic?: boolean;
-  platform?:string;
-  custom_disclaimer_responses?:unknown[];
+  platform?: string;
+  custom_disclaimer_responses?: unknown[];
   field_data: { name: string; values: string[] }[];
 }
 export const baseLeadFields = "id,created_time,form_id,ad_id,field_data";
-export const leadFields=baseLeadFields+',ad_name,campaign_id,campaign_name,is_organic,platform,custom_disclaimer_responses';
-export async function fetchLeads<T>(env:Env,path:string,token:string,params:Record<string,string>){try{return await graph<T>(env,path,token,{...params,fields:leadFields});}catch(e){if(e instanceof GraphError&&['100','10','200'].includes(e.code))return graph<T>(env,path,token,{...params,fields:baseLeadFields});throw e;}}
+export const leadFields =
+  baseLeadFields +
+  ",ad_name,campaign_id,campaign_name,is_organic,platform,custom_disclaimer_responses";
+export async function fetchLeads<T>(
+  env: Env,
+  path: string,
+  token: string,
+  params: Record<string, string>,
+) {
+  try {
+    return await graph<T>(env, path, token, { ...params, fields: leadFields });
+  } catch (e) {
+    if (e instanceof GraphError && ["100", "10", "200"].includes(e.code))
+      return graph<T>(env, path, token, { ...params, fields: baseLeadFields });
+    throw e;
+  }
+}

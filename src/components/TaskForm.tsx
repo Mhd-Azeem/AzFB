@@ -70,15 +70,14 @@ export function TaskForm({
           Assigned agent
           <select name="assignedTo" defaultValue={identity.userId}>
             <option value={identity.userId}>{identity.name} (you)</option>
-            {identity.role !== "Agent" && (
+            {identity.role !== "Agent" &&
               members.data
-                ?.filter((m) => !m.disabled&&m.id!==identity.userId)
+                ?.filter((m) => !m.disabled && m.id !== identity.userId)
                 .map((m) => (
                   <option key={m.id} value={m.id}>
                     {m.name}
                   </option>
-                ))
-            )}
+                ))}
           </select>
         </label>
       </div>

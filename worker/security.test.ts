@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { testDatabase } from "./test-db";
 import { app } from "./index";
-import { dispatchInbox } from './inbox';
+import { dispatchInbox } from "./inbox";
 import type { Env } from "./types";
 import {
   encrypt,
@@ -14,7 +14,13 @@ import {
 } from "./crypto";
 import { after, now } from "./types";
 import { one, rows, statement } from "./db";
-import { saveLead, processJob, retryDelay, enqueueStatement,maintenance } from "./jobs";
+import {
+  saveLead,
+  processJob,
+  retryDelay,
+  enqueueStatement,
+  maintenance,
+} from "./jobs";
 import { leadFilter, makeCsv, pagination } from "./filters";
 const origin = "http://localhost:8787",
   secret = "test-only-session-pepper-with-at-least-32-characters",
@@ -194,7 +200,7 @@ describe("cryptography and validation", () => {
       leadFilter(new URLSearchParams("from=2026-11-02&to=2026-11-01"), "w"),
     ).toThrow();
     expect(leadFilter(new URLSearchParams("q=100%25"), "w").args[1]).toBe(
-      "%100\\%%",
+      "%100!%%",
     );
     const c = makeCsv(
       [{ name: '  =HYPERLINK("x")', note: "one, two\nthree" }],
@@ -205,7 +211,146 @@ describe("cryptography and validation", () => {
   });
 });
 describe("authentication, authorization and workspace isolation", () => {
-  it('serves all live read endpoints with an empty database and zero denominators',async()=>{await provision();const s=await login();for(const path of ['/dashboard','/analytics','/leads','/forms','/tasks','/members','/workspace','/notifications','/meta/connection-status','/meta/pages','/meta/jobs'])expect((await req(path,'GET',undefined,s)).status,path).toBe(200);const dashboard=await (await req('/dashboard','GET',undefined,s)).json() as {data:{total:number;conversionRate:number}};expect(dashboard.data.total).toBe(0);expect(dashboard.data.conversionRate).toBe(0);});
+  it("persists multiple notes and task completion, filters/sorts server pages and calculates real analytics", async () => {
+    await provision();
+    const s = await login(),
+      wid = (await one<{ id: string }>(env, "SELECT id FROM workspaces"))!.id;
+    await seed(wid);
+    for (let i = 0; i < 3; i++)
+      await saveLead(env, wid, "111", "222", {
+        ...fixture,
+        id: String(800 + i),
+        created_time: `2026-11-0${i + 1}T10:00:00Z`,
+        field_data: [
+          { name: "full_name", values: [["Zoe", "Amelia", "Noah"][i]] },
+          { name: "email", values: ["person@example.test"] },
+        ],
+      });
+    const leads = (
+      (await (
+        await req("/leads?pageSize=1&sort=name", "GET", undefined, s)
+      ).json()) as {
+        data: { items: { id: string; name: string }[]; total: number };
+      }
+    ).data;
+    expect(leads.total).toBe(3);
+    expect(leads.items[0].name).toBe("Amelia");
+    const lid = leads.items[0].id;
+    expect(
+      (await req(`/leads/${lid}`, "PATCH", { status: "Converted" }, s)).status,
+    ).toBe(200);
+    for (const note of ["First conversation", "Follow-up context"])
+      expect(
+        (await req(`/leads/${lid}/notes`, "POST", { body: note }, s)).status,
+      ).toBe(201);
+    const detail = (
+      (await (await req(`/leads/${lid}`, "GET", undefined, s)).json()) as {
+        data: {
+          notes: unknown[];
+          possible_duplicates: unknown[];
+          activities: unknown[];
+        };
+      }
+    ).data;
+    expect(detail.notes).toHaveLength(2);
+    expect(detail.possible_duplicates).toHaveLength(2);
+    expect(detail.activities.length).toBeGreaterThanOrEqual(4);
+    const matched = (
+      (await (
+        await req(
+          "/leads?q=Amelia&status=Converted&form=222&pageId=111&from=2026-11-01&to=2026-11-03",
+          "GET",
+          undefined,
+          s,
+        )
+      ).json()) as { data: { total: number } }
+    ).data;
+    expect(matched.total).toBe(1);
+    const next = (
+      (await (
+        await req("/leads?pageSize=1&page=2&sort=name", "GET", undefined, s)
+      ).json()) as { data: { items: { name: string }[] } }
+    ).data;
+    expect(next.items[0].name).toBe("Noah");
+    const task = await req(
+      "/tasks",
+      "POST",
+      {
+        leadId: lid,
+        title: "Call again",
+        dueAt: new Date(Date.now() - 60000).toISOString(),
+        priority: "High",
+      },
+      s,
+    );
+    expect(task.status).toBe(201);
+    const tid = ((await task.json()) as { data: { id: string } }).data.id;
+    let metrics = (
+      (await (
+        await req(
+          "/analytics?from=2026-11-01&to=2026-11-03",
+          "GET",
+          undefined,
+          s,
+        )
+      ).json()) as {
+        data: { total: number; conversionRate: number; followupsDue: number };
+      }
+    ).data;
+    expect(metrics.total).toBe(3);
+    expect(metrics.conversionRate).toBe(33.3);
+    expect(metrics.followupsDue).toBe(1);
+    expect(
+      (await req(`/tasks/${tid}`, "PATCH", { completed: true }, s)).status,
+    ).toBe(200);
+    metrics = (
+      (await (
+        await req(
+          "/analytics?from=2026-11-01&to=2026-11-03",
+          "GET",
+          undefined,
+          s,
+        )
+      ).json()) as { data: typeof metrics }
+    ).data;
+    expect(metrics.followupsDue).toBe(0);
+  });
+  it("logout revokes the full rotation family and prevents an old token renewing it", async () => {
+    await provision();
+    const s = await login(),
+      response = await req("/auth/rotate", "POST", {}, s),
+      next = {
+        cookie: response.headers.get("Set-Cookie")!.split(";")[0],
+        csrf: ((await response.json()) as { data: { csrf: string } }).data.csrf,
+      };
+    expect((await req("/auth/me", "GET", undefined, s)).status).toBe(200);
+    expect((await req("/auth/logout", "POST", {}, next)).status).toBe(200);
+    expect((await req("/auth/rotate", "POST", {}, s)).status).toBe(401);
+    expect((await req("/auth/me", "GET", undefined, next)).status).toBe(401);
+  });
+  it("serves all live read endpoints with an empty database and zero denominators", async () => {
+    await provision();
+    const s = await login();
+    for (const path of [
+      "/dashboard",
+      "/analytics",
+      "/leads",
+      "/forms",
+      "/tasks",
+      "/members",
+      "/workspace",
+      "/notifications",
+      "/meta/connection-status",
+      "/meta/pages",
+      "/meta/jobs",
+    ])
+      expect((await req(path, "GET", undefined, s)).status, path).toBe(200);
+    const dashboard = (await (
+      await req("/dashboard", "GET", undefined, s)
+    ).json()) as { data: { total: number; conversionRate: number } };
+    expect(dashboard.data.total).toBe(0);
+    expect(dashboard.data.conversionRate).toBe(0);
+  });
   it("provisions once, uses HttpOnly sessions, protects writes and logs out", async () => {
     expect((await provision()).status).toBe(201);
     expect((await provision()).status).toBe(409);
@@ -284,11 +429,19 @@ describe("authentication, authorization and workspace isolation", () => {
     ).toBe(200);
     expect((await req("/auth/me", "GET", undefined, s)).status).toBe(401);
   });
-  it("expires and rotates sessions while removing the old cookie token", async () => {
+  it("rotates with a bounded grace window and expires old tokens without interrupting in-flight refreshes", async () => {
     await provision();
     const s = await login(),
       rotated = await req("/auth/rotate", "POST", {}, s);
     expect(rotated.status).toBe(200);
+    expect((await req("/auth/me", "GET", undefined, s)).status).toBe(200);
+    const oldHash = await sha(s.cookie.split("=")[1]);
+    await statement(
+      env,
+      "UPDATE sessions SET idle_expires_at=? WHERE id_hash=?",
+      new Date(0).toISOString(),
+      oldHash,
+    ).run();
     expect((await req("/auth/me", "GET", undefined, s)).status).toBe(401);
     await statement(
       env,
@@ -429,9 +582,343 @@ describe("authentication, authorization and workspace isolation", () => {
   });
 });
 describe("Meta webhook and ingestion pipeline", () => {
-  it('binds OAuth state to the session, encrypts credentials and confirms Page subscription',async()=>{await provision();const s=await login();const connect=await req('/meta/connect','GET',undefined,s);expect(connect.status).toBe(200);const url=new URL((await connect.json() as {data:{url:string}}).data.url),state=url.searchParams.get('state')!;expect(url.searchParams.get('redirect_uri')).toBe(origin+'/api/meta/callback');expect((await req('/meta/callback?state=wrong&code=code','GET',undefined,s)).status).toBe(400);const permissions=['pages_show_list','pages_read_engagement','pages_manage_metadata','leads_retrieval'];const mock=vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({access_token:'short-fixture'}))).mockResolvedValueOnce(new Response(JSON.stringify({access_token:'long-fixture'}))).mockResolvedValueOnce(new Response(JSON.stringify({data:{is_valid:true,app_id:'12345',user_id:'meta-user',expires_at:Math.floor(Date.now()/1000)+86400,scopes:permissions}}))).mockResolvedValueOnce(new Response(JSON.stringify({data:permissions.map(permission=>({permission,status:'granted'}))}))).mockResolvedValueOnce(new Response(JSON.stringify({data:[{id:'111',name:'Authorized Page',access_token:'page-fixture',tasks:['MANAGE']}]})));vi.stubGlobal('fetch',mock);expect((await req(`/meta/callback?state=${state}&code=fixture-code`,'GET',undefined,s)).status).toBe(302);expect((await req(`/meta/callback?state=${state}&code=fixture-code`,'GET',undefined,s)).status).toBe(400);const stored=await one<{token_encrypted:string;workspace_id:string}>(env,'SELECT workspace_id,token_encrypted FROM meta_connections');expect(stored!.token_encrypted).not.toContain('long-fixture');expect(await decrypt(env.TOKEN_ENCRYPTION_KEY,stored!.token_encrypted,`${stored!.workspace_id}:user`)).toBe('long-fixture');const pages=await (await req('/meta/pages','GET',undefined,s)).text();expect(pages).not.toContain('page-fixture');expect(pages).not.toContain('token_encrypted');mock.mockResolvedValueOnce(new Response(JSON.stringify({data:{is_valid:true,app_id:'12345',scopes:permissions}}))).mockResolvedValueOnce(new Response(JSON.stringify({data:[{id:'222',name:'Authorized form',status:'ACTIVE',questions:[]}]}))).mockResolvedValueOnce(new Response(JSON.stringify({success:true}))).mockResolvedValueOnce(new Response(JSON.stringify({data:[{id:'12345',subscribed_fields:['leadgen']}]})));expect((await req('/meta/pages/select','POST',{pageId:'111'},s)).status).toBe(200);expect((await one<{authorized:number}>(env,'SELECT authorized FROM facebook_pages'))?.authorized).toBe(1);expect((await req('/forms/222','PATCH',{selected:true},s)).status).toBe(200);expect((await req('/meta/sync','POST',{formIds:['222']},s)).status).toBe(202);expect((await rows(env,'SELECT * FROM sync_jobs')).length).toBe(1);});
-  it('rejects OAuth callbacks from a different session and missing permissions',async()=>{await provision();const first=await login(),second=await login();const u=new URL((await (await req('/meta/connect','GET',undefined,first)).json() as {data:{url:string}}).data.url),state=u.searchParams.get('state')!;expect((await req(`/meta/callback?state=${state}&code=fixture`,'GET',undefined,second)).status).toBe(400);const mock=vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({access_token:'short'}))).mockResolvedValueOnce(new Response(JSON.stringify({access_token:'long'}))).mockResolvedValueOnce(new Response(JSON.stringify({data:{is_valid:true,app_id:'12345',user_id:'u'}}))).mockResolvedValueOnce(new Response(JSON.stringify({data:[]})));vi.stubGlobal('fetch',mock);expect((await req(`/meta/callback?state=${state}&code=fixture`,'GET',undefined,first)).status).toBe(403);expect((await rows(env,'SELECT * FROM meta_connections')).length).toBe(0);});
-  it('runs incremental reconciliation with an overlap and saves the checkpoint',async()=>{await provision();const wid=(await one<{id:string}>(env,'SELECT id FROM workspaces'))!.id;await seed(wid);const old=new Date(Date.now()-7*3600000).toISOString();await statement(env,'UPDATE instant_forms SET reconciled_at=? WHERE workspace_id=?',old,wid).run();const mock=vi.fn().mockResolvedValue(new Response(JSON.stringify({data:[fixture]})));vi.stubGlobal('fetch',mock);await maintenance(env);expect(mock).toHaveBeenCalledTimes(1);const filter=new URL(String(mock.mock.calls[0][0])).searchParams.get('filtering')!;expect(JSON.parse(filter)[0].field).toBe('time_created');expect(JSON.parse(filter)[0].value).toBe(Math.floor((Date.parse(old)-48*3600000)/1000));expect((await one<{status:string}>(env,'SELECT status FROM sync_jobs'))?.status).toBe('complete');const checkpoint=(await one<{reconciled_at:string}>(env,'SELECT reconciled_at FROM instant_forms'))!.reconciled_at;expect(checkpoint>old).toBe(true);await maintenance(env);expect(mock).toHaveBeenCalledTimes(1);});
+  it("dispatches a large signed batch in bounded slices and reclaims an expired inbox lease", async () => {
+    await provision();
+    const wid = (await one<{ id: string }>(env, "SELECT id FROM workspaces"))!
+      .id;
+    await seed(wid);
+    const payload = {
+      object: "page",
+      entry: [
+        {
+          id: "111",
+          changes: Array.from({ length: 7 }, (_, i) => ({
+            field: "leadgen",
+            value: {
+              page_id: "111",
+              form_id: "222",
+              leadgen_id: String(900 + i),
+            },
+          })),
+        },
+      ],
+    };
+    const sig =
+      "sha256=" + (await hmac(env.META_APP_SECRET!, JSON.stringify(payload)));
+    expect(
+      (
+        await req("/webhooks/meta", "POST", payload, undefined, {
+          "X-Hub-Signature-256": sig,
+        })
+      ).status,
+    ).toBe(200);
+    const inbox = (await one<{ id: string }>(
+      env,
+      "SELECT id FROM webhook_inbox",
+    ))!;
+    await dispatchInbox(env, inbox.id);
+    expect((await rows(env, "SELECT id FROM sync_jobs")).length).toBe(3);
+    await statement(
+      env,
+      "UPDATE webhook_inbox SET status='running',lease_until=? WHERE id=?",
+      new Date(0).toISOString(),
+      inbox.id,
+    ).run();
+    await dispatchInbox(env, inbox.id);
+    await dispatchInbox(env, inbox.id);
+    expect((await rows(env, "SELECT id FROM sync_jobs")).length).toBe(7);
+    expect(
+      (await one<{ status: string }>(env, "SELECT status FROM webhook_inbox"))
+        ?.status,
+    ).toBe("complete");
+  });
+  it("preserves partial-page progress on retry without double-counting imported leads", async () => {
+    await provision();
+    const wid = (await one<{ id: string }>(env, "SELECT id FROM workspaces"))!
+      .id;
+    await seed(wid);
+    const job = enqueueStatement(
+      env,
+      wid,
+      "111",
+      "222",
+      null,
+      "history",
+      "partial",
+    );
+    await job.statement.run();
+    const f = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            data: [fixture, { ...fixture, id: "334", field_data: null }],
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ data: [fixture, { ...fixture, id: "334" }] }),
+        ),
+      );
+    vi.stubGlobal("fetch", f);
+    await processJob(env, job.id);
+    expect(
+      (await one<{ imported: number }>(env, "SELECT imported FROM sync_jobs"))
+        ?.imported,
+    ).toBe(1);
+    await statement(
+      env,
+      "UPDATE sync_jobs SET status='pending',attempts=0,next_run_at=? WHERE id=?",
+      new Date(0).toISOString(),
+      job.id,
+    ).run();
+    await processJob(env, job.id);
+    expect(
+      (await one<{ imported: number }>(env, "SELECT imported FROM sync_jobs"))
+        ?.imported,
+    ).toBe(2);
+  });
+  it("binds OAuth state to the session, encrypts credentials and confirms Page subscription", async () => {
+    await provision();
+    const s = await login();
+    const connect = await req("/meta/connect", "GET", undefined, s);
+    expect(connect.status).toBe(200);
+    const url = new URL(
+        ((await connect.json()) as { data: { url: string } }).data.url,
+      ),
+      state = url.searchParams.get("state")!;
+    expect(url.searchParams.get("redirect_uri")).toBe(
+      origin + "/api/meta/callback",
+    );
+    expect(
+      (await req("/meta/callback?state=wrong&code=code", "GET", undefined, s))
+        .status,
+    ).toBe(400);
+    const permissions = [
+      "pages_show_list",
+      "pages_read_engagement",
+      "pages_manage_metadata",
+      "leads_retrieval",
+    ];
+    const mock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access_token: "short-fixture" })),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access_token: "long-fixture" })),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            data: {
+              is_valid: true,
+              app_id: "12345",
+              user_id: "meta-user",
+              expires_at: Math.floor(Date.now() / 1000) + 86400,
+              scopes: permissions,
+            },
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            data: permissions.map((permission) => ({
+              permission,
+              status: "granted",
+            })),
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            data: [
+              {
+                id: "111",
+                name: "Authorized Page",
+                access_token: "page-fixture",
+                tasks: ["MANAGE"],
+              },
+            ],
+          }),
+        ),
+      );
+    vi.stubGlobal("fetch", mock);
+    expect(
+      (
+        await req(
+          `/meta/callback?state=${state}&code=fixture-code`,
+          "GET",
+          undefined,
+          s,
+        )
+      ).status,
+    ).toBe(302);
+    expect(
+      (
+        await req(
+          `/meta/callback?state=${state}&code=fixture-code`,
+          "GET",
+          undefined,
+          s,
+        )
+      ).status,
+    ).toBe(400);
+    const stored = await one<{ token_encrypted: string; workspace_id: string }>(
+      env,
+      "SELECT workspace_id,token_encrypted FROM meta_connections",
+    );
+    expect(stored!.token_encrypted).not.toContain("long-fixture");
+    expect(
+      await decrypt(
+        env.TOKEN_ENCRYPTION_KEY,
+        stored!.token_encrypted,
+        `${stored!.workspace_id}:user`,
+      ),
+    ).toBe("long-fixture");
+    const pages = await (await req("/meta/pages", "GET", undefined, s)).text();
+    expect(pages).not.toContain("page-fixture");
+    expect(pages).not.toContain("token_encrypted");
+    mock
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            data: { is_valid: true, app_id: "12345", scopes: permissions },
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            data: [
+              {
+                id: "222",
+                name: "Authorized form",
+                status: "ACTIVE",
+                questions: [],
+              },
+            ],
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ success: true })))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            data: [{ id: "12345", subscribed_fields: ["leadgen"] }],
+          }),
+        ),
+      );
+    expect(
+      (await req("/meta/pages/select", "POST", { pageId: "111" }, s)).status,
+    ).toBe(200);
+    expect(
+      (
+        await one<{ authorized: number }>(
+          env,
+          "SELECT authorized FROM facebook_pages",
+        )
+      )?.authorized,
+    ).toBe(1);
+    expect(
+      (await req("/forms/222", "PATCH", { selected: true }, s)).status,
+    ).toBe(200);
+    expect(
+      (await req("/meta/sync", "POST", { formIds: ["222"] }, s)).status,
+    ).toBe(202);
+    expect((await rows(env, "SELECT * FROM sync_jobs")).length).toBe(1);
+  });
+  it("rejects OAuth callbacks from a different session and missing permissions", async () => {
+    await provision();
+    const first = await login(),
+      second = await login();
+    const u = new URL(
+        (
+          (await (
+            await req("/meta/connect", "GET", undefined, first)
+          ).json()) as { data: { url: string } }
+        ).data.url,
+      ),
+      state = u.searchParams.get("state")!;
+    expect(
+      (
+        await req(
+          `/meta/callback?state=${state}&code=fixture`,
+          "GET",
+          undefined,
+          second,
+        )
+      ).status,
+    ).toBe(400);
+    const mock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access_token: "short" })),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access_token: "long" })),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            data: { is_valid: true, app_id: "12345", user_id: "u" },
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: [] })));
+    vi.stubGlobal("fetch", mock);
+    expect(
+      (
+        await req(
+          `/meta/callback?state=${state}&code=fixture`,
+          "GET",
+          undefined,
+          first,
+        )
+      ).status,
+    ).toBe(403);
+    expect((await rows(env, "SELECT * FROM meta_connections")).length).toBe(0);
+  });
+  it("runs incremental reconciliation with an overlap and saves the checkpoint", async () => {
+    await provision();
+    const wid = (await one<{ id: string }>(env, "SELECT id FROM workspaces"))!
+      .id;
+    await seed(wid);
+    const old = new Date(Date.now() - 7 * 3600000).toISOString();
+    await statement(
+      env,
+      "UPDATE instant_forms SET reconciled_at=? WHERE workspace_id=?",
+      old,
+      wid,
+    ).run();
+    const mock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ data: [fixture] })));
+    vi.stubGlobal("fetch", mock);
+    await maintenance(env);
+    expect(mock).toHaveBeenCalledTimes(1);
+    const filter = new URL(String(mock.mock.calls[0][0])).searchParams.get(
+      "filtering",
+    )!;
+    expect(JSON.parse(filter)[0].field).toBe("time_created");
+    expect(JSON.parse(filter)[0].value).toBe(
+      Math.floor((Date.parse(old) - 48 * 3600000) / 1000),
+    );
+    expect(
+      (await one<{ status: string }>(env, "SELECT status FROM sync_jobs"))
+        ?.status,
+    ).toBe("complete");
+    const checkpoint = (await one<{ reconciled_at: string }>(
+      env,
+      "SELECT reconciled_at FROM instant_forms",
+    ))!.reconciled_at;
+    expect(checkpoint > old).toBe(true);
+    await maintenance(env);
+    expect(mock).toHaveBeenCalledTimes(1);
+  });
   it("verifies challenge, rejects bad signatures and durably deduplicates replay", async () => {
     await provision();
     const wid = (await one<{ id: string }>(env, "SELECT id FROM workspaces"))!
@@ -476,7 +963,14 @@ describe("Meta webhook and ingestion pipeline", () => {
           })
         ).status,
       ).toBe(200);
-    const inbox=await rows<{id:string}>(env,'SELECT id FROM webhook_inbox');expect(inbox).toHaveLength(1);expect((await rows(env,'SELECT * FROM sync_jobs')).length).toBe(0);await dispatchInbox(env,inbox[0].id);await dispatchInbox(env,inbox[0].id);
+    const inbox = await rows<{ id: string }>(
+      env,
+      "SELECT id FROM webhook_inbox",
+    );
+    expect(inbox).toHaveLength(1);
+    expect((await rows(env, "SELECT * FROM sync_jobs")).length).toBe(0);
+    await dispatchInbox(env, inbox[0].id);
+    await dispatchInbox(env, inbox[0].id);
     expect((await rows(env, "SELECT * FROM webhook_events")).length).toBe(1);
     expect((await rows(env, "SELECT * FROM sync_jobs")).length).toBe(1);
     expect((await rows(env, "SELECT * FROM leads")).length).toBe(0);
