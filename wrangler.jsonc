@@ -23,14 +23,16 @@
       "migrations_dir": "migrations",
     },
   ],
-  "triggers": { "crons": ["*/10 * * * *"] },
+  "triggers": {
+    "crons": ["*/10 * * * *"],
+  },
   "env": {
     "production": {
       "name": "az-leads",
       "vars": {
         "ENVIRONMENT": "production",
-        "APP_ORIGIN": "",
-        "ALLOWED_ORIGINS": "",
+        "APP_ORIGIN": "https://az-leads.azeem-maestro.workers.dev",
+        "ALLOWED_ORIGINS": "https://az-leads.azeem-maestro.workers.dev",
         "META_GRAPH_VERSION": "",
       },
       // Fill database_id with the real value returned by `wrangler d1 create`.
@@ -38,11 +40,13 @@
         {
           "binding": "DB",
           "database_name": "az-leads",
-          "database_id": "",
+          "database_id": "f0feca0e-292c-40eb-95af-6ec3f3389ede",
           "migrations_dir": "migrations",
         },
       ],
-      "triggers": { "crons": ["*/10 * * * *"] },
+      "triggers": {
+        "crons": ["*/10 * * * *"],
+      },
       // Optional queues configuration is documented in docs/DEPLOYMENT.md.
     },
   },

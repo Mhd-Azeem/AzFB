@@ -2,7 +2,7 @@
 
 React 19 + TypeScript + Vite frontend, Hono/Cloudflare Worker API, D1 database, and optional Cloudflare Queues. The navy/blue dashboard now defaults to authenticated database-backed mode. The fictional frontend is isolated at `/?mode=demo`; live mode never falls back to it.
 
-**Status:** implemented and locally tested; production deployment, Meta app approval/authorization, and a real lead round trip require external configuration. No hosted URL or successful Facebook connection is claimed.
+**Status:** implemented and tested; the initial deployment is available at [az-leads.azeem-maestro.workers.dev](https://az-leads.azeem-maestro.workers.dev). Remote migrations are applied. Login remains locked until server secrets and the Owner account are provisioned; Meta authorization and real lead delivery are unverified. See [current deployment status](docs/DEPLOYMENT-STATUS.md).
 
 ## Features
 
@@ -57,4 +57,4 @@ Open `http://localhost:8787`. Provision the Owner once using `/api/auth/bootstra
 - [Security controls, recovery and privacy operations](docs/SECURITY.md)
 - [Verification results and limitations](VERIFICATION.md)
 
-No app IDs, database UUIDs, production origins or secrets are fabricated. Production binding values are deliberately empty until configured. D1+Cron mode needs no Queue binding but is intentionally low-throughput; Queues is recommended for timely delivery and history imports. Availability windows, App Review and free-tier quotas are provider constraints, not promises made by this application.
+No app IDs, database UUIDs, production origins or secrets are fabricated. The production database binding and origin now use values verified during setup. D1+Cron mode needs no Queue binding but is intentionally low-throughput; Queues is recommended for timely delivery and history imports. Availability windows, App Review and free-tier quotas are provider constraints, not promises made by this application.

@@ -1,6 +1,6 @@
 # Deployment and the first genuine lead
 
-No Cloudflare resources, production URL, Meta authorization or real lead delivery have been created or verified by the implementation. All commands below are for the owner to run after reviewing configuration. Never paste secrets into chat, commit them, or use `VITE_` variables for credentials.
+The initial deployment and remote migrations are now verified; see [current deployment status](DEPLOYMENT-STATUS.md). For the current account, skip database creation, migrations and first deployment below and continue with server secrets and Owner provisioning. Meta authorization and real lead delivery remain unverified. All commands below are for the owner to run after reviewing configuration. Never paste secrets into chat, commit them, or use `VITE_` variables for credentials.
 
 ## 1. Local development
 
