@@ -33,7 +33,7 @@
         "ENVIRONMENT": "production",
         "APP_ORIGIN": "https://az-leads.azeem-maestro.workers.dev",
         "ALLOWED_ORIGINS": "https://az-leads.azeem-maestro.workers.dev",
-        "META_GRAPH_VERSION": "",
+        "META_GRAPH_VERSION": "v26.0",
       },
       // Fill database_id with the real value returned by `wrangler d1 create`.
       "d1_databases": [

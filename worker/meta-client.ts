@@ -33,11 +33,13 @@ export class GraphError extends Error {
     public code: string,
     public transient: boolean,
     public retryAfter = 60,
+    message?: string,
   ) {
     super(
-      transient
-        ? "Meta is temporarily unavailable or rate limited. Retry is scheduled."
-        : "Meta access failed. Check Page lead access and reconnect Facebook.",
+      message ||
+        (transient
+          ? "Meta is temporarily unavailable or rate limited. Please try again."
+          : "Meta access failed. Check Page lead access and reconnect Facebook."),
     );
   }
 }
@@ -70,7 +72,9 @@ export async function graph<T>(
   const init: RequestInit = {
     method,
     headers: { Authorization: `Bearer ${token}` },
-    redirect: "error",
+    // Workers supports manual/follow, not the Fetch standard's error mode.
+    // Reject returned redirects below instead of forwarding authorization.
+    redirect: "manual",
     signal: AbortSignal.timeout(15000),
   };
   if (method === "GET")
@@ -87,6 +91,15 @@ export async function graph<T>(
     response = await fetch(url, init);
   } catch {
     throw new GraphError("network", true);
+  }
+  if (response.status >= 300 && response.status < 400) {
+    await response.body?.cancel();
+    throw new GraphError(
+      "redirect",
+      false,
+      60,
+      "Meta returned an unexpected redirect. Reconnect Facebook or contact the workspace owner.",
+    );
   }
   let result: unknown;
   try {
@@ -127,18 +140,47 @@ export async function exchange(env: Env, params: Record<string, string>) {
   let response: Response;
   try {
     response = await fetch(url, {
-      redirect: "error",
+      redirect: "manual",
       signal: AbortSignal.timeout(15000),
     });
   } catch {
-    throw new GraphError("oauth_network", true);
+    throw new GraphError(
+      "oauth_network",
+      true,
+      60,
+      "Could not reach Meta during token exchange. Start Connect Facebook again to get a fresh authorization code.",
+    );
   }
-  const b = (await response.json()) as {
+  if (response.status >= 300 && response.status < 400) {
+    await response.body?.cancel();
+    throw new GraphError(
+      "oauth_redirect",
+      false,
+      60,
+      "Meta returned an unexpected token-exchange redirect. Start Connect Facebook again or contact the workspace owner.",
+    );
+  }
+  let b: {
     access_token?: string;
     expires_in?: number;
   };
-  if (!response.ok || typeof b.access_token !== "string")
-    throw new GraphError("oauth_exchange", false);
+  try {
+    b = (await response.json()) as typeof b;
+  } catch {
+    throw new GraphError(
+      "oauth_invalid_response",
+      response.status >= 500,
+      60,
+      "Meta returned an unreadable token response. Start Connect Facebook again.",
+    );
+  }
+  if (!response.ok || typeof b.access_token !== "string" || !b.access_token)
+    throw new GraphError(
+      "oauth_exchange",
+      response.status === 429 || response.status >= 500,
+      60,
+      "Meta rejected the token exchange. Check the App ID, App Secret and exact redirect URI, then start Connect Facebook again.",
+    );
   return { access_token: b.access_token, expires_in: b.expires_in };
 }
 export interface DebugToken {
