@@ -1,3 +1,4 @@
+import { whatsappNumber } from "../shared/whatsapp";
 import { Hono } from "hono";
 import type { Bindings } from "./types";
 import { ApiError, id, now } from "./types";
@@ -142,6 +143,43 @@ crmRoutes.get("/leads/:id", async (c) => {
       possible_duplicates: duplicates,
     },
   });
+});
+crmRoutes.post("/leads/:id/whatsapp", async (c) => {
+  const a = c.get("auth"),
+    lid = c.req.param("id");
+  await ownedLead(c.env, a.workspaceId, lid);
+  const b = await body(c);
+  keys(b, ["phone"]);
+  const number = whatsappNumber(text(b.phone, "phone", 80));
+  if (!number)
+    throw new ApiError(
+      400,
+      "invalid_phone",
+      "Enter a full international phone number with its country code, for example +94771234567.",
+    );
+  const t = now();
+  await c.env.DB.batch([
+    statement(
+      c.env,
+      "UPDATE leads SET status='Contacted',updated_at=? WHERE workspace_id=? AND id=? AND status='New'",
+      t,
+      a.workspaceId,
+      lid,
+    ),
+    statement(
+      c.env,
+      "INSERT INTO lead_activities(id,workspace_id,lead_id,actor_id,kind,detail,created_at) VALUES(?,?,?,?,?,?,?)",
+      id(),
+      a.workspaceId,
+      lid,
+      a.userId,
+      "whatsapp_attempt",
+      "WhatsApp chat requested. New leads move to Contacted; later stages are preserved. Message delivery is not verified.",
+      t,
+    ),
+    audit(c.env, a, "lead.whatsapp_attempt", lid),
+  ]);
+  return c.json({ ok: true, data: { url: `https://wa.me/${number}` } });
 });
 crmRoutes.patch("/leads/:id", async (c) => {
   const a = c.get("auth"),

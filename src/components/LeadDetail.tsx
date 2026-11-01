@@ -1,3 +1,4 @@
+import { whatsappNumber } from "../../shared/whatsapp";
 import { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import type { Identity, LeadDetail as Detail } from "../../shared/contracts";
@@ -21,7 +22,8 @@ export function LeadDetail({
       useResource<{ id: string; name: string; disabled: number }[]>("/members"),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
-    [confirmDelete, setConfirmDelete] = useState(false);
+    [confirmDelete, setConfirmDelete] = useState(false),
+    [contactPhone, setContactPhone] = useState<string | null>(null);
   useEffect(() => {
     const opener = document.activeElement as HTMLElement;
     dialog.current?.showModal();
@@ -159,20 +161,54 @@ export function LeadDetail({
                   Email
                 </a>
               )}
-              {l.phone.replace(/\D/g, "").length >= 7 && (
-                <a
-                  className="button secondary"
-                  href={`https://wa.me/${l.phone.replace(/\D/g, "")}`}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Open WhatsApp
-                </a>
-              )}
+              <button
+                className="button secondary"
+                disabled={busy || !whatsappNumber(contactPhone ?? l.phone)}
+                onClick={async () => {
+                  // Open synchronously so browsers do not block an async popup.
+                  const target = window.open("about:blank", "_blank");
+                  if (!target) {
+                    setError(
+                      "Allow pop-ups for this CRM, then try WhatsApp again. No status was changed.",
+                    );
+                    return;
+                  }
+                  target.opener = null;
+                  setBusy(true);
+                  setError("");
+                  try {
+                    const result = await write<{ url: string }>(
+                      `/leads/${leadId}/whatsapp`,
+                      { phone: contactPhone ?? l.phone },
+                    );
+                    target.location.replace(result.url);
+                    refresh();
+                  } catch (e) {
+                    target.close();
+                    setError((e as Error).message);
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+              >
+                Open WhatsApp &amp; mark contacted
+              </button>
             </div>
+            <label className="field-label">
+              WhatsApp number (include country code)
+              <input
+                type="tel"
+                value={contactPhone ?? l.phone}
+                onChange={(e) => setContactPhone(e.target.value)}
+                placeholder="+94771234567"
+                maxLength={80}
+              />
+            </label>
             <small className="settings-hint">
-              These links open your apps. No message is sent automatically.
-              Verify the country code before contacting.
+              Use a full international number. Corrections here apply to this
+              contact attempt only. Opening WhatsApp moves New leads to
+              Contacted; later stages stay unchanged. No message is sent
+              automatically and delivery is not verified.
             </small>
             {!!d.possible_duplicates.length && (
               <div className="demo-banner section-gap">

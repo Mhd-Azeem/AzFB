@@ -241,6 +241,80 @@ describe("authentication, authorization and workspace isolation", () => {
     ).data;
     expect(n.newLeadCount).toBe(0);
   });
+  it("records WhatsApp attempts, validates numbers, preserves later stages and requires authentication", async () => {
+    await provision();
+    const session = await login();
+    const wid = (await one<{ id: string }>(env, "SELECT id FROM workspaces"))!
+      .id;
+    await seed(wid);
+    await saveLead(env, wid, "111", "222", fixture);
+    const lead = (await one<{ id: string }>(
+      env,
+      "SELECT id FROM leads WHERE workspace_id=?",
+      wid,
+    ))!;
+    const path = `/leads/${lead.id}/whatsapp`;
+    expect((await req(path, "POST", { phone: "+94771234567" })).status).toBe(
+      401,
+    );
+    expect(
+      (await req(path, "POST", { phone: "0771234567" }, session)).status,
+    ).toBe(400);
+    expect(
+      (await one<{ status: string }>(
+        env,
+        "SELECT status FROM leads WHERE id=?",
+        lead.id,
+      ))!.status,
+    ).toBe("New");
+    const result = await req(
+      path,
+      "POST",
+      { phone: "+94 77 123 4567" },
+      session,
+    );
+    expect(result.status).toBe(200);
+    expect(((await result.json()) as { data: { url: string } }).data.url).toBe(
+      "https://wa.me/94771234567",
+    );
+    expect(
+      (await one<{ status: string }>(
+        env,
+        "SELECT status FROM leads WHERE id=?",
+        lead.id,
+      ))!.status,
+    ).toBe("Contacted");
+    for (const stage of ["Interested", "Converted", "Rejected"]) {
+      await req(`/leads/${lead.id}`, "PATCH", { status: stage }, session);
+      expect(
+        (await req(path, "POST", { phone: "0094771234567" }, session)).status,
+      ).toBe(200);
+      expect(
+        (await one<{ status: string }>(
+          env,
+          "SELECT status FROM leads WHERE id=?",
+          lead.id,
+        ))!.status,
+      ).toBe(stage);
+    }
+    expect(
+      await rows(
+        env,
+        "SELECT id FROM lead_activities WHERE lead_id=? AND kind='whatsapp_attempt'",
+        lead.id,
+      ),
+    ).toHaveLength(4);
+    expect(
+      (
+        await req(
+          "/leads/unknown/whatsapp",
+          "POST",
+          { phone: "+94771234567" },
+          session,
+        )
+      ).status,
+    ).toBe(404);
+  });
   it("persists multiple notes and task completion, filters/sorts server pages and calculates real analytics", async () => {
     await provision();
     const s = await login(),
@@ -519,6 +593,16 @@ describe("authentication, authorization and workspace isolation", () => {
         "SELECT id FROM leads WHERE workspace_id=?",
         me.workspaceId,
       );
+    expect(
+      (
+        await req(
+          `/leads/${other!.id}/whatsapp`,
+          "POST",
+          { phone: "+94771234567" },
+          s,
+        )
+      ).status,
+    ).toBe(404);
     expect((await req(`/leads/${other!.id}`, "GET", undefined, s)).status).toBe(
       404,
     );
