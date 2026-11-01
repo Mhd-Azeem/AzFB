@@ -211,6 +211,36 @@ describe("cryptography and validation", () => {
   });
 });
 describe("authentication, authorization and workspace isolation", () => {
+  it("keeps unread lead notifications across logins until the member marks them read", async () => {
+    await provision();
+    const first = await login(),
+      wid = (await one<{ id: string }>(env, "SELECT id FROM workspaces"))!.id;
+    await statement(
+      env,
+      "UPDATE workspace_members SET created_at=? WHERE workspace_id=?",
+      new Date(Date.now() - 3600000).toISOString(),
+      wid,
+    ).run();
+    await seed(wid);
+    await saveLead(env, wid, "111", "222", fixture);
+    await req("/auth/logout", "POST", {}, first);
+    const second = await login();
+    let n = (
+      (await (
+        await req("/notifications", "GET", undefined, second)
+      ).json()) as { data: { newLeadCount: number } }
+    ).data;
+    expect(n.newLeadCount).toBe(1);
+    expect((await req("/notifications/read", "POST", {}, second)).status).toBe(
+      200,
+    );
+    n = (
+      (await (
+        await req("/notifications", "GET", undefined, second)
+      ).json()) as { data: { newLeadCount: number } }
+    ).data;
+    expect(n.newLeadCount).toBe(0);
+  });
   it("persists multiple notes and task completion, filters/sorts server pages and calculates real analytics", async () => {
     await provision();
     const s = await login(),

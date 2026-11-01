@@ -660,7 +660,7 @@ crmRoutes.get("/notifications", async (c) => {
   const a = c.get("auth"),
     read = await one<{ seen_at: string }>(
       c.env,
-      "SELECT seen_at FROM notification_reads WHERE workspace_id=? AND user_id=?",
+      "SELECT COALESCE(n.seen_at,m.created_at) AS seen_at FROM workspace_members m LEFT JOIN notification_reads n ON n.workspace_id=m.workspace_id AND n.user_id=m.user_id WHERE m.workspace_id=? AND m.user_id=?",
       a.workspaceId,
       a.userId,
     );
