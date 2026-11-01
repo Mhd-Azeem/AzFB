@@ -626,6 +626,7 @@ describe("Meta webhook and ingestion pipeline", () => {
       "pages_show_list",
       "pages_read_engagement",
       "pages_manage_metadata",
+      "pages_manage_ads",
       "leads_retrieval",
     ];
     vi.stubGlobal(
@@ -792,6 +793,7 @@ describe("Meta webhook and ingestion pipeline", () => {
       "pages_show_list",
       "pages_read_engagement",
       "pages_manage_metadata",
+      "pages_manage_ads",
       "leads_retrieval",
     ];
     const mock = vi

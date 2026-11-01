@@ -154,11 +154,12 @@ metaRoutes.get("/callback", async (c) => {
     granted = permissionResult.data
       .filter((p) => p.status === "granted")
       .map((p) => p.permission);
-  if (scopes.some((s) => !granted.includes(s)))
+  const missingPermissions = scopes.filter((s) => !granted.includes(s));
+  if (missingPermissions.length)
     throw new ApiError(
       403,
       "missing_permissions",
-      "Meta did not grant all required permissions. Reconnect and allow Page and lead access.",
+      `Meta did not grant: ${missingPermissions.join(", ")}. Add these permissions to the Meta login configuration and reconnect Facebook.`,
     );
   if (!debug.data.user_id) throw new GraphError("missing_meta_user", false);
   const t = now();
@@ -272,11 +273,14 @@ metaRoutes.post("/pages/select", async (c) => {
         `${a.workspaceId}:page:${pid}`,
       ),
       debug = await debugToken(c.env, token);
-    if (scopes.some((s) => !debug.data.scopes?.includes(s)))
+    const missingPagePermissions = scopes.filter(
+      (s) => !debug.data.scopes?.includes(s),
+    );
+    if (missingPagePermissions.length)
       throw new ApiError(
         403,
         "missing_permissions",
-        "This Page token lacks required permissions. Check Meta Lead Access Manager and reconnect.",
+        `This Page token lacks: ${missingPagePermissions.join(", ")}. Add these permissions to the Meta login configuration and reconnect Facebook.`,
       );
     const grant = debug.data.granular_scopes?.find(
       (g) => g.scope === "leads_retrieval",
