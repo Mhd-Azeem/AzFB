@@ -1,9 +1,40 @@
-import { Hono } from 'hono';
-import type { Bindings } from './types';
-import { ApiError,id,now } from './types';
-import { equal,sha,verifySignature } from './crypto';
-import { rows,statement } from './db';
-import { enqueueStatement,signalJobs } from './jobs';
-export const webhooks=new Hono<Bindings>();
-webhooks.get('/',async c=>{if(!c.env.META_WEBHOOK_VERIFY_TOKEN)throw new ApiError(503,'webhook_not_configured','Webhook is not configured.');const token=c.req.query('hub.verify_token')||'',challenge=c.req.query('hub.challenge');if(c.req.query('hub.mode')!=='subscribe'||!equal(await sha(token),await sha(c.env.META_WEBHOOK_VERIFY_TOKEN))||!challenge||challenge.length>200)throw new ApiError(403,'verification_failed','Webhook verification failed.');return c.text(challenge);});
-webhooks.post('/',async c=>{if(!c.env.META_APP_SECRET)throw new ApiError(503,'webhook_not_configured','Webhook is not configured.');const raw=await c.req.arrayBuffer();if(!await verifySignature(c.env.META_APP_SECRET,raw,c.req.header('X-Hub-Signature-256')||null))throw new ApiError(403,'invalid_signature','Invalid webhook signature.');let data:{object?:string;entry?:{id?:string;changes?:{field?:string;value?:{page_id?:string;form_id?:string;leadgen_id?:string}}[]}[]};try{data=JSON.parse(new TextDecoder().decode(raw));}catch{throw new ApiError(400,'invalid_json','Invalid webhook JSON.');}if(data.object!=='page'||!Array.isArray(data.entry))return c.json({ok:true,data:{accepted:true}});if(data.entry.length>100)throw new ApiError(413,'too_many_events','Webhook batch is too large.');const hash=await sha(raw),jobs:string[]=[];for(const entry of data.entry){if(!Array.isArray(entry.changes))continue;for(const change of entry.changes){if(change.field!=='leadgen')continue;const v=change.value;if(!v||typeof entry.id!=='string'||v.page_id!==entry.id||![v.page_id,v.form_id,v.leadgen_id].every(s=>typeof s==='string'&&/^\d{1,64}$/.test(s)))continue;const matches=await rows<{workspace_id:string;selected:number}>(c.env,'SELECT p.workspace_id,COALESCE(f.selected,0) AS selected FROM facebook_pages p LEFT JOIN instant_forms f ON f.workspace_id=p.workspace_id AND f.page_id=p.id AND f.id=? WHERE p.id=? AND p.authorized=1',v.form_id,v.page_id);for(const match of matches){const t=now(),event=id(),job=enqueueStatement(c.env,match.workspace_id,v.page_id!,v.form_id!,v.leadgen_id!,'lead',`lead:${v.page_id}:${v.leadgen_id}`);await c.env.DB.batch([statement(c.env,'INSERT OR IGNORE INTO webhook_events(id,workspace_id,page_id,lead_id,form_id,payload_hash,payload_json,state,received_at) VALUES(?,?,?,?,?,?,?,?,?)',event,match.workspace_id,v.page_id,v.leadgen_id,v.form_id,hash,JSON.stringify(v),match.selected?'received':'unselected',t),...(match.selected?[job.statement]:[]),statement(c.env,'UPDATE facebook_pages SET last_webhook_at=? WHERE workspace_id=? AND id=?',t,match.workspace_id,v.page_id)]);if(match.selected)jobs.push(job.id);}}}c.executionCtx.waitUntil(signalJobs(c.env,jobs));return c.json({ok:true,data:{accepted:true}});});
+import { Hono } from "hono";
+import type { Bindings } from "./types";
+import { ApiError, id, now } from "./types";
+import { equal, sha, verifySignature } from "./crypto";
+import { statement } from "./db";
+import { notifyInbox, type LeadEvent } from "./inbox";
+export const webhooks = new Hono<Bindings>();
+webhooks.get("/", async (c) => {
+  if (!c.env.META_WEBHOOK_VERIFY_TOKEN)
+    throw new ApiError(
+      503,
+      "webhook_not_configured",
+      "Webhook is not configured.",
+    );
+  const token = c.req.query("hub.verify_token") || "",
+    challenge = c.req.query("hub.challenge");
+  if (
+    c.req.query("hub.mode") !== "subscribe" ||
+    !equal(await sha(token), await sha(c.env.META_WEBHOOK_VERIFY_TOKEN)) ||
+    !challenge ||
+    challenge.length > 200
+  )
+    throw new ApiError(
+      403,
+      "verification_failed",
+      "Webhook verification failed.",
+    );
+  return c.text(challenge);
+});
+webhooks.post('/',async c=>{
+ if(!c.env.META_APP_SECRET)throw new ApiError(503,'webhook_not_configured','Webhook is not configured.');
+ const raw=await c.req.arrayBuffer();if(!await verifySignature(c.env.META_APP_SECRET,raw,c.req.header('X-Hub-Signature-256')||null))throw new ApiError(403,'invalid_signature','Invalid webhook signature.');
+ let data:unknown;try{data=JSON.parse(new TextDecoder().decode(raw));}catch{throw new ApiError(400,'invalid_json','Invalid webhook JSON.');}
+ if(!data||typeof data!=='object'||Array.isArray(data))throw new ApiError(400,'invalid_payload','Invalid webhook object.');
+ const payload=data as {object?:string;entry?:{id?:unknown;changes?:{field?:unknown;value?:Record<string,unknown>}[]}[]};
+ if(payload.object!=='page'||!Array.isArray(payload.entry))return c.json({ok:true,data:{accepted:true}});
+ const events:LeadEvent[]=[];for(const entry of payload.entry){if(!entry||typeof entry.id!=='string'||!Array.isArray(entry.changes))continue;for(const change of entry.changes){if(!change||change.field!=='leadgen'||!change.value)continue;const v=change.value;if(v.page_id!==entry.id||![v.page_id,v.form_id,v.leadgen_id].every(s=>typeof s==='string'&&/^\d{1,64}$/.test(s)))continue;events.push({page_id:v.page_id as string,form_id:v.form_id as string,leadgen_id:v.leadgen_id as string,...(typeof v.ad_id==='string'?{ad_id:v.ad_id}:{}),...(typeof v.created_time==='number'?{created_time:v.created_time}:{})});}}
+ if(events.length){const hash=await sha(raw),t=now();await statement(c.env,'INSERT OR IGNORE INTO webhook_inbox(id,events_json,received_at,updated_at) VALUES(?,?,?,?)',hash,JSON.stringify(events),t,t).run();c.executionCtx.waitUntil(notifyInbox(c.env,hash));}
+ return c.json({ok:true,data:{accepted:true}});
+});

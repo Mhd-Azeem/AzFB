@@ -14,20 +14,20 @@
     "deploy": "npm run build && wrangler deploy --env production"
   },
   "dependencies": {
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0",
+    "hono": "^4.10.0",
     "lucide-react": "^0.468.0",
-    "hono": "^4.10.0"
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^4.20251001.0",
+    "@types/node": "^24.0.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^5.0.0",
     "typescript": "~5.9.3",
     "vite": "^7.1.0",
-    "vitest": "^3.2.4",
-    "wrangler": "^4.45.0",
-    "@cloudflare/workers-types": "^4.20251001.0",
-    "@types/node": "^24.0.0"
+    "vitest": "^5.0.5",
+    "wrangler": "^4.45.0"
   }
 }

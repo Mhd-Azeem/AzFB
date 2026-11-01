@@ -1,23 +1,349 @@
-import { Hono } from 'hono';
-import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
-import type { Bindings,Ctx,Principal } from './types';
-import { ApiError,after,id,now } from './types';
-import { audit,one,statement } from './db';
-import { equal,hashPassword,hmac,randomToken,sha,verifyPassword } from './crypto';
-import { body,email,keys,password,text } from './validation';
-export const authRoutes=new Hono<Bindings>();
-const cookieName=(c:Ctx)=>c.env.ENVIRONMENT==='local'?'az_session':'__Host-az_session';
-function cookie(c:Ctx,value:string,seconds=3600){setCookie(c,cookieName(c),value,{path:'/',secure:c.env.ENVIRONMENT!=='local',httpOnly:true,sameSite:'Lax',maxAge:seconds});}
-export function requireAdmin(c:Ctx){if(c.get('auth').role==='Agent')throw new ApiError(403,'forbidden','Administrator access is required.');}
-export function requireOwner(c:Ctx){if(c.get('auth').role!=='Owner')throw new ApiError(403,'forbidden','Owner access is required.');}
-export function requireCsrf(c:Ctx){if(!equal(c.req.header('X-CSRF-Token')||'',c.get('auth').csrf))throw new ApiError(403,'csrf','Session verification failed. Reload and try again.');}
-export async function authenticate(c:Ctx,next:()=>Promise<void>){const token=getCookie(c,cookieName(c));if(!token)throw new ApiError(401,'unauthenticated','Please sign in.');const hash=await sha(token);const s=await one<Principal & {csrf_hash:string}>(c.env,`SELECT s.id_hash AS sessionHash,s.user_id AS userId,s.workspace_id AS workspaceId,m.role,u.email,u.name,w.name AS workspaceName,s.csrf_hash,s.created_at AS createdAt,s.expires_at AS expiresAt FROM sessions s JOIN users u ON u.id=s.user_id JOIN workspace_members m ON m.user_id=s.user_id AND m.workspace_id=s.workspace_id JOIN workspaces w ON w.id=s.workspace_id WHERE s.id_hash=? AND s.expires_at>? AND s.idle_expires_at>? AND u.disabled=0`,hash,now(),now());if(!s)throw new ApiError(401,'session_expired','Your session expired. Please sign in again.');const csrf=await hmac(c.env.SESSION_SECRET,`csrf:${token}`);if(!equal(await sha(csrf),s.csrf_hash))throw new ApiError(401,'session_expired','Session is no longer valid.');c.set('auth',{...s,csrf});if(!['GET','HEAD','OPTIONS'].includes(c.req.method))requireCsrf(c);await next();}
-async function newSession(c:Ctx,userId:string,workspaceId:string,createdAt=now(),expires=after(8*3600),oldHash?:string){const token=randomToken(),hash=await sha(token),csrf=await hmac(c.env.SESSION_SECRET,`csrf:${token}`),t=now();const insert=statement(c.env,'INSERT INTO sessions(id_hash,user_id,workspace_id,csrf_hash,created_at,expires_at,idle_expires_at,rotated_at) VALUES(?,?,?,?,?,?,?,?)',hash,userId,workspaceId,await sha(csrf),createdAt,expires,after(3600),t);if(oldHash){await c.env.DB.batch([insert,statement(c.env,'DELETE FROM sessions WHERE id_hash=? AND workspace_id=?',oldHash,workspaceId)]);}else await insert.run();cookie(c,token,Math.max(0,Math.min(3600,Math.floor((Date.parse(expires)-Date.now())/1000))));return csrf;}
-export async function limit(c:Ctx,key:string,max:number,seconds:number){const hash=await hmac(c.env.SESSION_SECRET,key),t=now();const row=await statement(c.env,`INSERT INTO auth_limits(key_hash,attempts,reset_at) VALUES(?,1,?) ON CONFLICT(key_hash) DO UPDATE SET attempts=CASE WHEN reset_at<=? THEN 1 ELSE attempts+1 END,reset_at=CASE WHEN reset_at<=? THEN excluded.reset_at ELSE reset_at END RETURNING attempts`,hash,after(seconds),t,t).first<{attempts:number}>();if(!row||row.attempts>max){c.header('Retry-After',String(seconds));throw new ApiError(429,'rate_limited','Too many attempts. Try again later.');}return hash;}
-authRoutes.post('/bootstrap',async c=>{if(!c.env.BOOTSTRAP_SECRET||c.env.BOOTSTRAP_SECRET.length<32||!equal(await sha(c.req.header('X-Bootstrap-Secret')||''),await sha(c.env.BOOTSTRAP_SECRET)))throw new ApiError(403,'forbidden','Provisioning is unavailable.');await limit(c,`bootstrap:${c.req.header('CF-Connecting-IP')||'local'}`,5,900);if(await one(c.env,'SELECT 1 FROM provisioning WHERE id=1'))throw new ApiError(409,'provisioned','This deployment has already been provisioned.');const b=await body(c);keys(b,['email','password','name','workspaceName']);const mail=email(b.email),pass=password(b.password),name=text(b.name,'name',100),workspace=text(b.workspaceName,'workspace name',100),uid=id(),wid=id(),t=now();const hash=await hashPassword(pass,c.env.SESSION_SECRET);await c.env.DB.batch([statement(c.env,'INSERT INTO provisioning(id,created_at) VALUES(1,?)',t),statement(c.env,'INSERT INTO users(id,email,name,password_hash,created_at,updated_at) VALUES(?,?,?,?,?,?)',uid,mail,name,hash,t,t),statement(c.env,'INSERT INTO workspaces(id,name,created_at,updated_at) VALUES(?,?,?,?)',wid,workspace,t,t),statement(c.env,'INSERT INTO workspace_members(workspace_id,user_id,role,created_at) VALUES(?,?,?,?)',wid,uid,'Owner',t),audit(c.env,{userId:uid,workspaceId:wid},'workspace.provisioned',wid)]);return c.json({ok:true,data:{message:'Owner created. Remove BOOTSTRAP_SECRET and sign in.'}},201);});
-authRoutes.post('/login',async c=>{await limit(c,`login-ip:${c.req.header('CF-Connecting-IP')||'local'}`,20,900);const b=await body(c);keys(b,['email','password']);const mail=email(b.email),pass=typeof b.password==='string'&&b.password.length<=128?b.password:'';await limit(c,`login-account:${mail}`,5,900);const u=await one<{id:string;password_hash:string;workspace_id:string;disabled:number}>(c.env,'SELECT u.id,u.password_hash,u.disabled,m.workspace_id FROM users u JOIN workspace_members m ON m.user_id=u.id WHERE u.email=? ORDER BY m.created_at LIMIT 1',mail);const dummy='pbkdf2-sha256$100000$0000000000000000000000000000000000000000000000000000000000000000$0000000000000000000000000000000000000000000000000000000000000000';const valid=await verifyPassword(pass,u?.password_hash||dummy,c.env.SESSION_SECRET);if(!u||u.disabled||!valid){if(u)await audit(c.env,{userId:u.id,workspaceId:u.workspace_id},'auth.login_failed',u.id).run();throw new ApiError(401,'invalid_login','Email or password is incorrect.');}const csrf=await newSession(c,u.id,u.workspace_id);await audit(c.env,{userId:u.id,workspaceId:u.workspace_id},'auth.login',u.id).run();return c.json({ok:true,data:{csrf}});});
-authRoutes.use('*',authenticate);
-authRoutes.get('/me',c=>{const a=c.get('auth');return c.json({ok:true,data:{userId:a.userId,workspaceId:a.workspaceId,role:a.role,email:a.email,name:a.name,workspaceName:a.workspaceName,csrf:a.csrf}});});
-authRoutes.post('/rotate',async c=>{const a=c.get('auth');const csrf=await newSession(c,a.userId,a.workspaceId,a.createdAt,a.expiresAt,a.sessionHash);return c.json({ok:true,data:{csrf}});});
-authRoutes.post('/logout',async c=>{const a=c.get('auth');await c.env.DB.batch([statement(c.env,'DELETE FROM sessions WHERE id_hash=? AND workspace_id=?',a.sessionHash,a.workspaceId),audit(c.env,a,'auth.logout',a.userId)]);deleteCookie(c,cookieName(c),{path:'/',secure:c.env.ENVIRONMENT!=='local'});return c.json({ok:true,data:{message:'Signed out.'}});});
-authRoutes.post('/password',async c=>{const a=c.get('auth');await limit(c,`password:${a.userId}`,5,900);const b=await body(c);keys(b,['currentPassword','password']);const u=await one<{password_hash:string}>(c.env,'SELECT password_hash FROM users WHERE id=?',a.userId);if(!u||typeof b.currentPassword!=='string'||!await verifyPassword(b.currentPassword,u.password_hash,c.env.SESSION_SECRET))throw new ApiError(403,'invalid_password','Current password is incorrect.');const hash=await hashPassword(password(b.password),c.env.SESSION_SECRET);await c.env.DB.batch([statement(c.env,'UPDATE users SET password_hash=?,updated_at=? WHERE id=?',hash,now(),a.userId),statement(c.env,'DELETE FROM sessions WHERE user_id=?',a.userId),audit(c.env,a,'auth.password_changed',a.userId)]);deleteCookie(c,cookieName(c),{path:'/',secure:c.env.ENVIRONMENT!=='local'});return c.json({ok:true,data:{message:'Password changed. Sign in again.'}});});
+import { Hono } from "hono";
+import { getCookie, setCookie, deleteCookie } from "hono/cookie";
+import type { Bindings, Ctx, Principal } from "./types";
+import { ApiError, after, id, now } from "./types";
+import { audit, one, statement } from "./db";
+import {
+  equal,
+  hashPassword,
+  hmac,
+  randomToken,
+  sha,
+  verifyPassword,
+} from "./crypto";
+import { body, email, keys, password, text } from "./validation";
+export const authRoutes = new Hono<Bindings>();
+const cookieName = (c: Ctx) =>
+  c.env.ENVIRONMENT === "local" ? "az_session" : "__Host-az_session";
+function cookie(c: Ctx, value: string, seconds = 3600) {
+  setCookie(c, cookieName(c), value, {
+    path: "/",
+    secure: c.env.ENVIRONMENT !== "local",
+    httpOnly: true,
+    sameSite: "Lax",
+    maxAge: seconds,
+  });
+}
+export function requireAdmin(c: Ctx) {
+  if (c.get("auth").role === "Agent")
+    throw new ApiError(403, "forbidden", "Administrator access is required.");
+}
+export function requireOwner(c: Ctx) {
+  if (c.get("auth").role !== "Owner")
+    throw new ApiError(403, "forbidden", "Owner access is required.");
+}
+export function requireCsrf(c: Ctx) {
+  if (!equal(c.req.header("X-CSRF-Token") || "", c.get("auth").csrf))
+    throw new ApiError(
+      403,
+      "csrf",
+      "Session verification failed. Reload and try again.",
+    );
+}
+export async function authenticate(c: Ctx, next: () => Promise<void>) {
+  const token = getCookie(c, cookieName(c));
+  if (!token) throw new ApiError(401, "unauthenticated", "Please sign in.");
+  const hash = await sha(token);
+  const s = await one<Principal & { csrf_hash: string }>(
+    c.env,
+    `SELECT s.id_hash AS sessionHash,s.user_id AS userId,s.workspace_id AS workspaceId,m.role,u.email,u.name,w.name AS workspaceName,s.csrf_hash,s.created_at AS createdAt,s.expires_at AS expiresAt FROM sessions s JOIN users u ON u.id=s.user_id JOIN workspace_members m ON m.user_id=s.user_id AND m.workspace_id=s.workspace_id JOIN workspaces w ON w.id=s.workspace_id WHERE s.id_hash=? AND s.expires_at>? AND s.idle_expires_at>? AND u.disabled=0`,
+    hash,
+    now(),
+    now(),
+  );
+  if (!s)
+    throw new ApiError(
+      401,
+      "session_expired",
+      "Your session expired. Please sign in again.",
+    );
+  const csrf = await hmac(c.env.SESSION_SECRET, `csrf:${token}`);
+  if (!equal(await sha(csrf), s.csrf_hash))
+    throw new ApiError(401, "session_expired", "Session is no longer valid.");
+  c.set("auth", { ...s, csrf });
+  if (!["GET", "HEAD", "OPTIONS"].includes(c.req.method)) requireCsrf(c);
+  await next();
+}
+async function newSession(
+  c: Ctx,
+  userId: string,
+  workspaceId: string,
+  createdAt = now(),
+  expires = after(8 * 3600),
+  oldHash?: string,
+) {
+  const token = randomToken(),
+    hash = await sha(token),
+    csrf = await hmac(c.env.SESSION_SECRET, `csrf:${token}`),
+    t = now();
+  const insert = statement(
+    c.env,
+    "INSERT INTO sessions(id_hash,user_id,workspace_id,csrf_hash,created_at,expires_at,idle_expires_at,rotated_at) VALUES(?,?,?,?,?,?,?,?)",
+    hash,
+    userId,
+    workspaceId,
+    await sha(csrf),
+    createdAt,
+    expires,
+    after(3600),
+    t,
+  );
+  if (oldHash) {
+    await c.env.DB.batch([
+      insert,
+      statement(
+        c.env,
+        "DELETE FROM sessions WHERE id_hash=? AND workspace_id=?",
+        oldHash,
+        workspaceId,
+      ),
+    ]);
+  } else await insert.run();
+  cookie(
+    c,
+    token,
+    Math.max(
+      0,
+      Math.min(3600, Math.floor((Date.parse(expires) - Date.now()) / 1000)),
+    ),
+  );
+  return csrf;
+}
+export async function limit(c: Ctx, key: string, max: number, seconds: number) {
+  const hash = await hmac(c.env.SESSION_SECRET, key),
+    t = now();
+  const row = await statement(
+    c.env,
+    `INSERT INTO auth_limits(key_hash,attempts,reset_at) VALUES(?,1,?) ON CONFLICT(key_hash) DO UPDATE SET attempts=CASE WHEN reset_at<=? THEN 1 ELSE attempts+1 END,reset_at=CASE WHEN reset_at<=? THEN excluded.reset_at ELSE reset_at END RETURNING attempts`,
+    hash,
+    after(seconds),
+    t,
+    t,
+  ).first<{ attempts: number }>();
+  if (!row || row.attempts > max) {
+    c.header("Retry-After", String(seconds));
+    throw new ApiError(
+      429,
+      "rate_limited",
+      "Too many attempts. Try again later.",
+    );
+  }
+  return hash;
+}
+authRoutes.post("/bootstrap", async (c) => {
+  if (
+    !c.env.BOOTSTRAP_SECRET ||
+    c.env.BOOTSTRAP_SECRET.length < 32 ||
+    !equal(
+      await sha(c.req.header("X-Bootstrap-Secret") || ""),
+      await sha(c.env.BOOTSTRAP_SECRET),
+    )
+  )
+    throw new ApiError(403, "forbidden", "Provisioning is unavailable.");
+  await limit(
+    c,
+    `bootstrap:${c.req.header("CF-Connecting-IP") || "local"}`,
+    5,
+    900,
+  );
+  if (await one(c.env, "SELECT 1 FROM provisioning WHERE id=1"))
+    throw new ApiError(
+      409,
+      "provisioned",
+      "This deployment has already been provisioned.",
+    );
+  const b = await body(c);
+  keys(b, ["email", "password", "name", "workspaceName"]);
+  const mail = email(b.email),
+    pass = password(b.password),
+    name = text(b.name, "name", 100),
+    workspace = text(b.workspaceName, "workspace name", 100),
+    uid = id(),
+    wid = id(),
+    t = now();
+  const hash = await hashPassword(pass, c.env.SESSION_SECRET);
+  await c.env.DB.batch([
+    statement(c.env, "INSERT INTO provisioning(id,created_at) VALUES(1,?)", t),
+    statement(
+      c.env,
+      "INSERT INTO users(id,email,name,password_hash,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+      uid,
+      mail,
+      name,
+      hash,
+      t,
+      t,
+    ),
+    statement(
+      c.env,
+      "INSERT INTO workspaces(id,name,created_at,updated_at) VALUES(?,?,?,?)",
+      wid,
+      workspace,
+      t,
+      t,
+    ),
+    statement(
+      c.env,
+      "INSERT INTO workspace_members(workspace_id,user_id,role,created_at) VALUES(?,?,?,?)",
+      wid,
+      uid,
+      "Owner",
+      t,
+    ),
+    audit(
+      c.env,
+      { userId: uid, workspaceId: wid },
+      "workspace.provisioned",
+      wid,
+    ),
+  ]);
+  return c.json(
+    {
+      ok: true,
+      data: { message: "Owner created. Remove BOOTSTRAP_SECRET and sign in." },
+    },
+    201,
+  );
+});
+authRoutes.post("/login", async (c) => {
+  await limit(
+    c,
+    `login-ip:${c.req.header("CF-Connecting-IP") || "local"}`,
+    20,
+    900,
+  );
+  const b = await body(c);
+  keys(b, ["email", "password"]);
+  const mail = email(b.email),
+    pass =
+      typeof b.password === "string" && b.password.length <= 128
+        ? b.password
+        : "";
+  const accountLimit=await limit(c, `login-account:${mail}`, 5, 900);
+  const u = await one<{
+    id: string;
+    password_hash: string;
+    workspace_id: string;
+    disabled: number;
+  }>(
+    c.env,
+    "SELECT u.id,u.password_hash,u.disabled,m.workspace_id FROM users u JOIN workspace_members m ON m.user_id=u.id WHERE u.email=? ORDER BY m.created_at LIMIT 1",
+    mail,
+  );
+  const dummy =
+    "pbkdf2-sha256$100000$0000000000000000000000000000000000000000000000000000000000000000$0000000000000000000000000000000000000000000000000000000000000000";
+  const valid = await verifyPassword(
+    pass,
+    u?.password_hash || dummy,
+    c.env.SESSION_SECRET,
+  );
+  if (!u || u.disabled || !valid) {
+    if (u)
+      await audit(
+        c.env,
+        { userId: u.id, workspaceId: u.workspace_id },
+        "auth.login_failed",
+        u.id,
+      ).run();
+    throw new ApiError(401, "invalid_login", "Email or password is incorrect.");
+  }
+  const csrf = await newSession(c, u.id, u.workspace_id);
+  await statement(c.env,'DELETE FROM auth_limits WHERE key_hash=?',accountLimit).run();
+  await audit(
+    c.env,
+    { userId: u.id, workspaceId: u.workspace_id },
+    "auth.login",
+    u.id,
+  ).run();
+  return c.json({ ok: true, data: { csrf } });
+});
+authRoutes.use("*", authenticate);
+authRoutes.get("/me", (c) => {
+  const a = c.get("auth");
+  return c.json({
+    ok: true,
+    data: {
+      userId: a.userId,
+      workspaceId: a.workspaceId,
+      role: a.role,
+      email: a.email,
+      name: a.name,
+      workspaceName: a.workspaceName,
+      csrf: a.csrf,
+    },
+  });
+});
+authRoutes.post("/rotate", async (c) => {
+  const a = c.get("auth");
+  const csrf = await newSession(
+    c,
+    a.userId,
+    a.workspaceId,
+    a.createdAt,
+    a.expiresAt,
+    a.sessionHash,
+  );
+  return c.json({ ok: true, data: { csrf } });
+});
+authRoutes.post("/logout", async (c) => {
+  const a = c.get("auth");
+  await c.env.DB.batch([
+    statement(
+      c.env,
+      "DELETE FROM sessions WHERE id_hash=? AND workspace_id=?",
+      a.sessionHash,
+      a.workspaceId,
+    ),
+    audit(c.env, a, "auth.logout", a.userId),
+  ]);
+  deleteCookie(c, cookieName(c), {
+    path: "/",
+    secure: c.env.ENVIRONMENT !== "local",
+  });
+  return c.json({ ok: true, data: { message: "Signed out." } });
+});
+authRoutes.post("/password", async (c) => {
+  const a = c.get("auth");
+  await limit(c, `password:${a.userId}`, 5, 900);
+  const b = await body(c);
+  keys(b, ["currentPassword", "password"]);
+  const u = await one<{ password_hash: string }>(
+    c.env,
+    "SELECT password_hash FROM users WHERE id=?",
+    a.userId,
+  );
+  if (
+    !u ||
+    typeof b.currentPassword !== "string" ||
+    !(await verifyPassword(
+      b.currentPassword,
+      u.password_hash,
+      c.env.SESSION_SECRET,
+    ))
+  )
+    throw new ApiError(
+      403,
+      "invalid_password",
+      "Current password is incorrect.",
+    );
+  const hash = await hashPassword(password(b.password), c.env.SESSION_SECRET);
+  await c.env.DB.batch([
+    statement(
+      c.env,
+      "UPDATE users SET password_hash=?,updated_at=? WHERE id=?",
+      hash,
+      now(),
+      a.userId,
+    ),
+    statement(c.env, "DELETE FROM sessions WHERE user_id=?", a.userId),
+    audit(c.env, a, "auth.password_changed", a.userId),
+  ]);
+  deleteCookie(c, cookieName(c), {
+    path: "/",
+    secure: c.env.ENVIRONMENT !== "local",
+  });
+  return c.json({
+    ok: true,
+    data: { message: "Password changed. Sign in again." },
+  });
+});
