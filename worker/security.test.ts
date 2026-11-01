@@ -612,6 +612,69 @@ describe("authentication, authorization and workspace isolation", () => {
   });
 });
 describe("Meta webhook and ingestion pipeline", () => {
+  it("reports the failed Page stage and required permission without exposing provider messages or tokens", async () => {
+    await provision();
+    const s = await login(),
+      wid = (await one<{ id: string }>(env, "SELECT id FROM workspaces"))!.id;
+    await seed(wid);
+    await statement(
+      env,
+      "UPDATE facebook_pages SET authorized=0,subscribed=0 WHERE workspace_id=?",
+      wid,
+    ).run();
+    const permissions = [
+      "pages_show_list",
+      "pages_read_engagement",
+      "pages_manage_metadata",
+      "leads_retrieval",
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              data: { is_valid: true, app_id: "12345", scopes: permissions },
+            }),
+          ),
+        )
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              error: {
+                code: 200,
+                error_subcode: 42,
+                message:
+                  "Requires pages_manage_ads permission; sensitive provider-token-value",
+              },
+            }),
+            { status: 403 },
+          ),
+        ),
+    );
+    const response = await req(
+      "/meta/pages/select",
+      "POST",
+      { pageId: "111" },
+      s,
+    );
+    expect(response.status).toBe(403);
+    const result = await response.text();
+    expect(result).toContain("meta_page_form_discovery_200");
+    expect(result).toContain("pages_manage_ads");
+    expect(result).toContain("200/42");
+    expect(result).not.toContain("provider-token-value");
+    expect(result).not.toContain("fixture-page-token");
+    const page = (await one<{
+      authorized: number;
+      subscribed: number;
+      last_error: string;
+    }>(env, "SELECT authorized,subscribed,last_error FROM facebook_pages"))!;
+    expect(page.authorized).toBe(0);
+    expect(page.subscribed).toBe(0);
+    expect(page.last_error).toContain("form discovery");
+  });
   it("dispatches a large signed batch in bounded slices and reclaims an expired inbox lease", async () => {
     await provision();
     const wid = (await one<{ id: string }>(env, "SELECT id FROM workspaces"))!

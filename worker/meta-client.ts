@@ -34,6 +34,7 @@ export class GraphError extends Error {
     public transient: boolean,
     public retryAfter = 60,
     message?: string,
+    public details?: { subcode?: number; requiredPermissions: string[] },
   ) {
     super(
       message ||
@@ -108,10 +109,20 @@ export async function graph<T>(
     throw new GraphError("invalid_response", response.status >= 500);
   }
   const error = (
-    result as { error?: { code?: number; is_transient?: boolean } }
+    result as {
+      error?: {
+        code?: number;
+        error_subcode?: number;
+        message?: string;
+        is_transient?: boolean;
+      };
+    }
   )?.error;
   if (!response.ok || error) {
-    const code = error?.code;
+    const code =
+      typeof error?.code === "number" && Number.isInteger(error.code)
+        ? error.code
+        : undefined;
     throw new GraphError(
       String(code || response.status),
       Boolean(
@@ -124,6 +135,27 @@ export async function graph<T>(
         3600,
         Math.max(60, Number(response.headers.get("Retry-After")) || 60),
       ),
+      undefined,
+      {
+        subcode:
+          typeof error?.error_subcode === "number"
+            ? error.error_subcode
+            : undefined,
+        requiredPermissions: [
+          "pages_show_list",
+          "pages_read_engagement",
+          "pages_manage_metadata",
+          "pages_manage_ads",
+          "leads_retrieval",
+          "ads_read",
+          "ads_management",
+          "business_management",
+        ].filter((permission) =>
+          new RegExp(`\\b${permission}\\b`).test(
+            typeof error?.message === "string" ? error.message : "",
+          ),
+        ),
+      },
     );
   }
   return result as T;

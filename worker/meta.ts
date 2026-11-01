@@ -264,65 +264,107 @@ metaRoutes.post("/pages/select", async (c) => {
       "not_found",
       "Page not available. Reconnect and grant Page access.",
     );
-  const token = await decrypt(
-      c.env.TOKEN_ENCRYPTION_KEY,
-      p.token_encrypted,
-      `${a.workspaceId}:page:${pid}`,
-    ),
-    debug = await debugToken(c.env, token);
-  if (scopes.some((s) => !debug.data.scopes?.includes(s)))
-    throw new ApiError(
-      403,
-      "missing_permissions",
-      "This Page token lacks required permissions. Check Meta Lead Access Manager and reconnect.",
+  let stage = "token_validation";
+  try {
+    const token = await decrypt(
+        c.env.TOKEN_ENCRYPTION_KEY,
+        p.token_encrypted,
+        `${a.workspaceId}:page:${pid}`,
+      ),
+      debug = await debugToken(c.env, token);
+    if (scopes.some((s) => !debug.data.scopes?.includes(s)))
+      throw new ApiError(
+        403,
+        "missing_permissions",
+        "This Page token lacks required permissions. Check Meta Lead Access Manager and reconnect.",
+      );
+    const grant = debug.data.granular_scopes?.find(
+      (g) => g.scope === "leads_retrieval",
     );
-  const grant = debug.data.granular_scopes?.find(
-    (g) => g.scope === "leads_retrieval",
-  );
-  if (grant?.target_ids && !grant.target_ids.includes(pid))
-    throw new ApiError(
-      403,
-      "lead_access",
-      "Lead retrieval was not authorized for this Page.",
+    if (grant?.target_ids && !grant.target_ids.includes(pid))
+      throw new ApiError(
+        403,
+        "lead_access",
+        "Lead retrieval was not authorized for this Page.",
+      );
+    stage = "form_discovery";
+    await refreshForms(c.env, a.workspaceId, pid, token);
+    stage = "page_subscription";
+    const subscribed = await graph<{ success: boolean }>(
+      c.env,
+      `${pid}/subscribed_apps`,
+      token,
+      { subscribed_fields: "leadgen" },
+      "POST",
     );
-  await refreshForms(c.env, a.workspaceId, pid, token);
-  const subscribed = await graph<{ success: boolean }>(
-    c.env,
-    `${pid}/subscribed_apps`,
-    token,
-    { subscribed_fields: "leadgen" },
-    "POST",
-  );
-  if (subscribed.success !== true)
-    throw new GraphError("subscription_failed", false);
-  const confirmation = await graph<
-    GraphList<{ id: string; subscribed_fields?: string[] }>
-  >(c.env, `${pid}/subscribed_apps`, token, { fields: "id,subscribed_fields" });
-  if (
-    !confirmation.data.some(
-      (v) =>
-        v.id === c.env.META_APP_ID && v.subscribed_fields?.includes("leadgen"),
+    if (subscribed.success !== true)
+      throw new GraphError("subscription_failed", false);
+    stage = "subscription_confirmation";
+    const confirmation = await graph<
+      GraphList<{ id: string; subscribed_fields?: string[] }>
+    >(c.env, `${pid}/subscribed_apps`, token, {
+      fields: "id,subscribed_fields",
+    });
+    if (
+      !confirmation.data.some(
+        (v) =>
+          v.id === c.env.META_APP_ID &&
+          v.subscribed_fields?.includes("leadgen"),
+      )
     )
-  )
-    throw new GraphError("subscription_unconfirmed", false);
-  await c.env.DB.batch([
-    statement(
-      c.env,
-      "UPDATE facebook_pages SET authorized=1,subscribed=1,token_expires_at=?,last_error=NULL,updated_at=? WHERE workspace_id=? AND id=?",
-      debug.expiresAt,
-      now(),
-      a.workspaceId,
-      pid,
-    ),
-    statement(
-      c.env,
-      "UPDATE meta_connections SET status='connected',last_error=NULL,updated_at=? WHERE workspace_id=?",
-      now(),
-      a.workspaceId,
-    ),
-    audit(c.env, a, "meta.page_connected", pid),
-  ]);
-  return c.json({ ok: true, data: { pageId: pid, subscribed: true } });
+      throw new GraphError("subscription_unconfirmed", false);
+    await c.env.DB.batch([
+      statement(
+        c.env,
+        "UPDATE facebook_pages SET authorized=1,subscribed=1,token_expires_at=?,last_error=NULL,updated_at=? WHERE workspace_id=? AND id=?",
+        debug.expiresAt,
+        now(),
+        a.workspaceId,
+        pid,
+      ),
+      statement(
+        c.env,
+        "UPDATE meta_connections SET status='connected',last_error=NULL,updated_at=? WHERE workspace_id=?",
+        now(),
+        a.workspaceId,
+      ),
+      audit(c.env, a, "meta.page_connected", pid),
+    ]);
+    return c.json({ ok: true, data: { pageId: pid, subscribed: true } });
+  } catch (error) {
+    if (!(error instanceof GraphError) && !(error instanceof ApiError))
+      throw error;
+    const permissionHint =
+      error instanceof GraphError && error.details?.requiredPermissions.length
+        ? ` Meta requires ${error.details.requiredPermissions.join(", ")}. Add the required permission to the Meta login configuration, then reconnect Facebook.`
+        : "";
+    const code = error.code;
+    const detail =
+      error instanceof GraphError
+        ? `Meta ${code}${error.details?.subcode ? `/${error.details.subcode}` : ""}`
+        : code;
+    const message = `Page connection failed during ${stage.replaceAll("_", " ")} (${detail}).${permissionHint || " " + error.message}`;
+    await c.env.DB.batch([
+      statement(
+        c.env,
+        "UPDATE facebook_pages SET last_error=?,updated_at=? WHERE workspace_id=? AND id=?",
+        message,
+        now(),
+        a.workspaceId,
+        pid,
+      ),
+      audit(c.env, a, "meta.page_connection_failed", pid),
+    ]);
+    throw new ApiError(
+      error instanceof GraphError
+        ? error.transient
+          ? 503
+          : 403
+        : error.status,
+      `meta_page_${stage}_${code}`,
+      message,
+    );
+  }
 });
 metaRoutes.get("/forms", async (c) => {
   requireAdmin(c);
