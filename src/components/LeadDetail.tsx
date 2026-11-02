@@ -1,4 +1,4 @@
-import { whatsappNumber } from "../../shared/whatsapp";
+import { WhatsAppButton } from "./WhatsAppButton";
 import { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import type { Identity, LeadDetail as Detail } from "../../shared/contracts";
@@ -161,38 +161,13 @@ export function LeadDetail({
                   Email
                 </a>
               )}
-              <button
-                className="button secondary"
-                disabled={busy || !whatsappNumber(contactPhone ?? l.phone)}
-                onClick={async () => {
-                  // Open synchronously so browsers do not block an async popup.
-                  const target = window.open("about:blank", "_blank");
-                  if (!target) {
-                    setError(
-                      "Allow pop-ups for this CRM, then try WhatsApp again. No status was changed.",
-                    );
-                    return;
-                  }
-                  target.opener = null;
-                  setBusy(true);
-                  setError("");
-                  try {
-                    const result = await write<{ url: string }>(
-                      `/leads/${leadId}/whatsapp`,
-                      { phone: contactPhone ?? l.phone },
-                    );
-                    target.location.replace(result.url);
-                    refresh();
-                  } catch (e) {
-                    target.close();
-                    setError((e as Error).message);
-                  } finally {
-                    setBusy(false);
-                  }
-                }}
-              >
-                Open WhatsApp &amp; mark contacted
-              </button>
+              <WhatsAppButton
+                leadId={leadId}
+                name={l.name}
+                phone={contactPhone ?? l.phone}
+                disabled={busy}
+                onError={setError}
+              />
             </div>
             <label className="field-label">
               WhatsApp number (include country code)

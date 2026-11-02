@@ -272,3 +272,11 @@ table .text-button {
     margin-left: auto;
   }
 }
+
+.whatsapp-button {
+  white-space: nowrap;
+  gap: 7px;
+}
+.whatsapp-button:not(:disabled) {
+  border-color: #328a68;
+}

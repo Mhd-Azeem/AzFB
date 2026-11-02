@@ -1,3 +1,5 @@
+import { WhatsAppButton } from "../components/WhatsAppButton";
+import { whatsappNumber } from "../../shared/whatsapp";
 import {
   ArrowDownToLine,
   ArrowUpRight,
@@ -34,7 +36,8 @@ export function Leads({
     [sort, setSort] = useState("newest"),
     [page, setPage] = useState(1),
     [exportError, setExportError] = useState(""),
-    [exporting, setExporting] = useState(false);
+    [exporting, setExporting] = useState(false),
+    [contactError, setContactError] = useState("");
   const query = useDebounce(q),
     params = new URLSearchParams({
       q: query,
@@ -206,6 +209,11 @@ export function Leads({
           </button>
         </p>
       )}
+      {contactError && (
+        <p role="alert" className="form-error">
+          {contactError}
+        </p>
+      )}
       {exportError && (
         <p role="alert" className="form-error">
           {exportError}
@@ -231,6 +239,7 @@ export function Leads({
                 <th>STATUS</th>
                 <th>SUBMITTED · UTC</th>
                 <th>ASSIGNED</th>
+                <th>WHATSAPP</th>
                 <th>
                   <span className="sr-only">Details</span>
                 </th>
@@ -268,6 +277,24 @@ export function Leads({
                   <td>
                     {members.data?.find((m) => m.id === l.assigned_to)?.name ||
                       "Unassigned"}
+                  </td>
+                  <td>
+                    <WhatsAppButton
+                      leadId={l.id}
+                      name={l.name}
+                      phone={l.phone}
+                      compact
+                      onError={setContactError}
+                    />
+                    {!whatsappNumber(l.phone) && (
+                      <button
+                        type="button"
+                        className="text-button"
+                        onClick={() => onOpen(l.id)}
+                      >
+                        Add / fix number
+                      </button>
+                    )}
                   </td>
                   <td>
                     <button
