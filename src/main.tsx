@@ -14,6 +14,8 @@ import { Tasks } from "./pages/Tasks";
 import { Settings } from "./pages/Settings";
 import "./styles.css";
 import "./live.css";
+import "./theme.css";
+import "./theme";
 const DemoApp = lazy(() => import("./demo/DemoApp"));
 function App() {
   const [identity, setIdentity] = useState<Identity | null>(null),

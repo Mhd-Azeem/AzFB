@@ -1,3 +1,4 @@
+import { ThemeSettings } from "../components/ThemeSettings";
 import { useState } from "react";
 import type { FormRecord, Identity } from "../../shared/contracts";
 import { useResource } from "../hooks/useResource";
@@ -103,6 +104,7 @@ export function Settings({
           {message}
         </p>
       )}
+      <ThemeSettings />
       <div className="settings-grid">
         <section className="panel settings-card">
           <h2>Facebook connection</h2>
