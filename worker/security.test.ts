@@ -911,6 +911,278 @@ describe("Meta webhook and ingestion pipeline", () => {
         ?.imported,
     ).toBe(2);
   });
+  it("migrates the live single-account schema without losing tokens, Page ownership or CRM data", async () => {
+    db.close();
+    db = testDatabase(5);
+    env.DB = db.DB;
+    await provision();
+    const session = await login();
+    const me = (
+      (await (await req("/auth/me", "GET", undefined, session)).json()) as {
+        data: { workspaceId: string; userId: string };
+      }
+    ).data;
+    await seed(me.workspaceId);
+    await saveLead(env, me.workspaceId, "111", "222", fixture);
+    const token = await encrypt(
+      env.TOKEN_ENCRYPTION_KEY,
+      "legacy-user-token",
+      `${me.workspaceId}:user`,
+    );
+    await statement(
+      env,
+      "INSERT INTO meta_connections(workspace_id,meta_user_id,token_encrypted,permissions_json,status,connected_by,created_at,updated_at) VALUES(?,?,?,'[]','connected',?,?,?)",
+      me.workspaceId,
+      "900",
+      token,
+      me.userId,
+      now(),
+      now(),
+    ).run();
+    db.migrate("0006_meta_accounts.sql");
+    const connection = await one<{
+      token_encrypted: string;
+      token_context: string;
+    }>(
+      env,
+      "SELECT token_encrypted,token_context FROM meta_connections WHERE workspace_id=? AND meta_user_id='900'",
+      me.workspaceId,
+    );
+    expect(connection!.token_encrypted).toBe(token);
+    expect(connection!.token_context).toBe("legacy");
+    expect(
+      (await one<{ meta_user_id: string }>(
+        env,
+        "SELECT meta_user_id FROM meta_account_pages WHERE workspace_id=? AND page_id='111'",
+        me.workspaceId,
+      ))!.meta_user_id,
+    ).toBe("900");
+    expect(await rows(env, "SELECT id FROM leads")).toHaveLength(1);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ success: true }))),
+    );
+    expect(
+      (await req("/meta/disconnect", "POST", { accountId: "900" }, session))
+        .status,
+    ).toBe(200);
+    expect(db.sqlite.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  });
+  it("keeps separate OAuth logins, filters/export by account, isolates reconnect and disconnect, and protects shared Pages", async () => {
+    await provision();
+    const session = await login();
+    const me = (
+      (await (await req("/auth/me", "GET", undefined, session)).json()) as {
+        data: { workspaceId: string; userId: string };
+      }
+    ).data;
+    const permissions = [
+      "pages_show_list",
+      "pages_read_engagement",
+      "pages_manage_metadata",
+      "pages_manage_ads",
+      "leads_retrieval",
+    ];
+    let currentUser = "900",
+      currentPages = ["111"];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input));
+        if (url.pathname.endsWith("/oauth/access_token"))
+          return new Response(
+            JSON.stringify({ access_token: `user-token-${currentUser}` }),
+          );
+        if (url.pathname.endsWith("/debug_token"))
+          return new Response(
+            JSON.stringify({
+              data: {
+                is_valid: true,
+                app_id: "12345",
+                user_id: currentUser,
+                scopes: permissions,
+              },
+            }),
+          );
+        if (url.pathname.endsWith("/me/permissions"))
+          return new Response(
+            JSON.stringify(
+              init?.method === "DELETE"
+                ? { success: true }
+                : {
+                    data: permissions.map((permission) => ({
+                      permission,
+                      status: "granted",
+                    })),
+                  },
+            ),
+          );
+        if (url.pathname.endsWith("/me/accounts"))
+          return new Response(
+            JSON.stringify({
+              data: currentPages.map((id) => ({
+                id,
+                name: `Page ${id}`,
+                access_token: `page-token-${currentUser}-${id}`,
+                tasks: ["MANAGE"],
+              })),
+            }),
+          );
+        throw new Error("Unexpected Meta request");
+      }),
+    );
+    async function connect(target = "") {
+      const start = await req(
+        "/meta/connect" + (target ? `?accountId=${target}` : ""),
+        "GET",
+        undefined,
+        session,
+      );
+      expect(start.status).toBe(200);
+      const url = new URL(
+        ((await start.json()) as { data: { url: string } }).data.url,
+      );
+      return req(
+        `/meta/callback?state=${url.searchParams.get("state")}&code=fixture`,
+        "GET",
+        undefined,
+        session,
+      );
+    }
+    expect((await connect()).status).toBe(302);
+    await seed(me.workspaceId);
+    await statement(
+      env,
+      "UPDATE facebook_pages SET authorized=1,subscribed=1 WHERE workspace_id=? AND id='111'",
+      me.workspaceId,
+    ).run();
+    await saveLead(env, me.workspaceId, "111", "222", fixture);
+    const firstToken = (await one<{ token_encrypted: string }>(
+      env,
+      "SELECT token_encrypted FROM facebook_pages WHERE workspace_id=? AND id='111'",
+      me.workspaceId,
+    ))!.token_encrypted;
+    currentUser = "901";
+    currentPages = ["555", "111"];
+    expect((await connect()).status).toBe(302);
+    expect(
+      await rows(env, "SELECT meta_user_id FROM meta_connections"),
+    ).toHaveLength(2);
+    expect(
+      (await one<{ token_encrypted: string }>(
+        env,
+        "SELECT token_encrypted FROM facebook_pages WHERE workspace_id=? AND id='111'",
+        me.workspaceId,
+      ))!.token_encrypted,
+    ).toBe(firstToken);
+    await seed(me.workspaceId, "555", "666");
+    await statement(
+      env,
+      "UPDATE facebook_pages SET authorized=1,subscribed=1 WHERE workspace_id=? AND id='555'",
+      me.workspaceId,
+    ).run();
+    await saveLead(env, me.workspaceId, "555", "666", {
+      ...fixture,
+      id: "777",
+      form_id: "666",
+    });
+    for (const account of ["900", "901"]) {
+      const response = (await (
+        await req(`/leads?accountId=${account}`, "GET", undefined, session)
+      ).json()) as { data: { total: number; items: { page_id: string }[] } };
+      expect(response.data.total).toBe(1);
+      expect(response.data.items[0].page_id).toBe(
+        account === "900" ? "111" : "555",
+      );
+    }
+    const csv = await (
+      await req("/leads/export?accountId=900", "GET", undefined, session)
+    ).text();
+    expect(csv).toContain("333");
+    expect(csv).not.toContain("777");
+    // Reconnecting account 900 while Facebook is signed into 901 is rejected before modifying either.
+    expect((await connect("900")).status).toBe(400);
+    currentUser = "900";
+    currentPages = ["111"];
+    expect((await connect("900")).status).toBe(302);
+    expect(
+      (await one<{ authorized: number }>(
+        env,
+        "SELECT authorized FROM facebook_pages WHERE workspace_id=? AND id='555'",
+        me.workspaceId,
+      ))!.authorized,
+    ).toBe(1);
+
+    expect(
+      (
+        await req(
+          "/meta/accounts/901",
+          "PATCH",
+          { label: "Second business" },
+          session,
+        )
+      ).status,
+    ).toBe(200);
+    expect((await req("/meta/disconnect", "POST", {}, session)).status).toBe(
+      400,
+    );
+    expect(
+      (await req("/meta/disconnect", "POST", { accountId: "900" }, session))
+        .status,
+    ).toBe(200);
+    expect(
+      (await one<{ authorized: number }>(
+        env,
+        "SELECT authorized FROM facebook_pages WHERE workspace_id=? AND id='555'",
+        me.workspaceId,
+      ))!.authorized,
+    ).toBe(1);
+    expect(
+      (await one<{ status: string }>(
+        env,
+        "SELECT status FROM meta_connections WHERE workspace_id=? AND meta_user_id='901'",
+        me.workspaceId,
+      ))!.status,
+    ).toBe("authorized");
+    const historical = (await (
+      await req("/leads?accountId=900", "GET", undefined, session)
+    ).json()) as { data: { total: number } };
+    expect(historical.data.total).toBe(1);
+    const safe = await (
+      await req("/meta/connection-status", "GET", undefined, session)
+    ).text();
+    expect(safe).not.toContain("token_encrypted");
+    expect(safe).not.toContain("user-token");
+    await statement(
+      env,
+      "INSERT INTO workspaces(id,name,created_at,updated_at) VALUES('other','Other',?,?)",
+      now(),
+      now(),
+    ).run();
+    await statement(
+      env,
+      "INSERT INTO meta_connections(workspace_id,meta_user_id,token_encrypted,permissions_json,status,connected_by,created_at,updated_at) VALUES('other','902','secret','[]','connected',?,?,?)",
+      me.userId,
+      now(),
+      now(),
+    ).run();
+    expect(
+      (await req("/meta/accounts/902", "PATCH", { label: "stolen" }, session))
+        .status,
+    ).toBe(404);
+    expect(
+      (await req("/meta/disconnect", "POST", { accountId: "902" }, session))
+        .status,
+    ).toBe(404);
+    expect(
+      (await req("/meta/connect?accountId=902", "GET", undefined, session))
+        .status,
+    ).toBe(404);
+    expect(
+      await (await req("/meta/accounts", "GET", undefined, session)).text(),
+    ).not.toContain("902");
+    expect(db.sqlite.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  });
   it("binds OAuth state to the session, encrypts credentials and confirms Page subscription", async () => {
     await provision();
     const s = await login();
@@ -1000,16 +1272,20 @@ describe("Meta webhook and ingestion pipeline", () => {
         )
       ).status,
     ).toBe(400);
-    const stored = await one<{ token_encrypted: string; workspace_id: string }>(
+    const stored = await one<{
+      token_encrypted: string;
+      workspace_id: string;
+      meta_user_id: string;
+    }>(
       env,
-      "SELECT workspace_id,token_encrypted FROM meta_connections",
+      "SELECT workspace_id,meta_user_id,token_encrypted FROM meta_connections",
     );
     expect(stored!.token_encrypted).not.toContain("long-fixture");
     expect(
       await decrypt(
         env.TOKEN_ENCRYPTION_KEY,
         stored!.token_encrypted,
-        `${stored!.workspace_id}:user`,
+        `${stored!.workspace_id}:user:${stored!.meta_user_id}`,
       ),
     ).toBe("long-fixture");
     const pages = await (await req("/meta/pages", "GET", undefined, s)).text();

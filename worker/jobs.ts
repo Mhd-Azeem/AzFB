@@ -391,10 +391,12 @@ export async function processJob(env: Env, jobId: string) {
             ),
             statement(
               env,
-              "UPDATE meta_connections SET status='needs_reauth',last_error=?,updated_at=? WHERE workspace_id=?",
+              "UPDATE meta_connections SET status='needs_reauth',last_error=?,updated_at=? WHERE workspace_id=? AND meta_user_id IN (SELECT meta_user_id FROM meta_account_pages WHERE workspace_id=? AND page_id=?)",
               "Page authorization requires reconnection.",
               now(),
               job.workspace_id,
+              job.workspace_id,
+              job.page_id,
             ),
           ]
         : []),

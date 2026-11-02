@@ -28,6 +28,7 @@ export function Leads({
 }) {
   const [q, setQ] = useState(""),
     [status, setStatus] = useState(initialStatus),
+    [accountId, setAccountId] = useState(""),
     [form, setForm] = useState(initialForm),
     [pageId, setPageId] = useState(""),
     [assignedTo, setAssignedTo] = useState(""),
@@ -42,6 +43,7 @@ export function Leads({
     params = new URLSearchParams({
       q: query,
       status,
+      accountId,
       form,
       pageId,
       assignedTo,
@@ -51,6 +53,10 @@ export function Leads({
       page: String(page),
       pageSize: "25",
     });
+  const accounts =
+    useResource<{ meta_user_id: string; label: string; status: string }[]>(
+      "/meta/accounts",
+    );
   const r = useResource<ListResult<LeadRecord>>(`/leads?${params}`),
     forms = useResource<FormRecord[]>("/forms"),
     members =
@@ -96,6 +102,37 @@ export function Leads({
           {exporting ? "Exporting…" : "Export filtered leads"}
         </button>
       </div>
+      <div
+        className="account-tabs"
+        role="group"
+        aria-label="Leads by Facebook account"
+      >
+        <button
+          className={`button ${!accountId ? "primary" : "secondary"}`}
+          aria-pressed={!accountId}
+          onClick={() => change(setAccountId, "")}
+        >
+          All accounts
+        </button>
+        {accounts.data?.map((a) => (
+          <button
+            key={a.meta_user_id}
+            className={`button ${accountId === a.meta_user_id ? "primary" : "secondary"}`}
+            aria-pressed={accountId === a.meta_user_id}
+            onClick={() => {
+              change(setAccountId, a.meta_user_id);
+              setForm("");
+              setPageId("");
+            }}
+          >
+            {a.label || a.meta_user_id}
+            {a.status === "disconnected" ? " (disconnected)" : ""}
+          </button>
+        ))}
+      </div>
+      {accounts.error && (
+        <ErrorState error={accounts.error} retry={accounts.reload} />
+      )}
       <div className="filters">
         <label className="search">
           <Search size={16} />
@@ -182,6 +219,7 @@ export function Leads({
         <button
           className="text-button"
           onClick={() => {
+            setAccountId("");
             setQ("");
             setStatus("");
             setForm("");

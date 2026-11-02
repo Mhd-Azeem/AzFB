@@ -116,6 +116,13 @@ function App() {
           </p>
         </div>
       </div>
+      {view === "Overview" && (
+        <div className="home-leads-action">
+          <button className="button primary" onClick={() => openLeads()}>
+            View leads
+          </button>
+        </div>
+      )}
       {reason && (
         <p className="form-error" role="alert">
           {reason}

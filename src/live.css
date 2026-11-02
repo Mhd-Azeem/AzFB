@@ -280,3 +280,24 @@ table .text-button {
 .whatsapp-button:not(:disabled) {
   border-color: #328a68;
 }
+
+.account-tabs {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 0 22px 18px;
+}
+.account-tabs .button {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.home-leads-action {
+  margin: 0 0 20px;
+}
+@media (max-width: 680px) {
+  .home-leads-action .button {
+    width: 100%;
+    justify-content: center;
+    min-height: 44px;
+  }
+}

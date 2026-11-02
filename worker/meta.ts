@@ -86,13 +86,25 @@ metaRoutes.get("/connect", async (c) => {
     );
   const a = c.get("auth"),
     state = randomToken();
+  const target = c.req.query("accountId") || null;
+  if (
+    target &&
+    !(await one(
+      c.env,
+      "SELECT 1 FROM meta_connections WHERE workspace_id=? AND meta_user_id=?",
+      a.workspaceId,
+      externalId(target),
+    ))
+  )
+    throw new ApiError(404, "not_found", "Facebook account not found.");
   await statement(
     c.env,
-    "INSERT INTO oauth_states(state_hash,session_family,workspace_id,expires_at) VALUES(?,?,?,?)",
+    "INSERT INTO oauth_states(state_hash,session_family,workspace_id,expires_at,target_user_id) VALUES(?,?,?,?,?)",
     await sha(state),
     a.familyId,
     a.workspaceId,
     after(600),
+    target,
   ).run();
   const url = new URL(
     `https://www.facebook.com/${c.env.META_GRAPH_VERSION}/dialog/oauth`,
@@ -123,12 +135,12 @@ metaRoutes.get("/callback", async (c) => {
     );
   const consumed = await statement(
     c.env,
-    "DELETE FROM oauth_states WHERE state_hash=? AND workspace_id=? AND session_family=? AND expires_at>? RETURNING state_hash",
+    "DELETE FROM oauth_states WHERE state_hash=? AND workspace_id=? AND session_family=? AND expires_at>? RETURNING state_hash,target_user_id",
     await sha(state),
     a.workspaceId,
     a.familyId,
     now(),
-  ).first();
+  ).first<{ state_hash: string; target_user_id: string | null }>();
   if (!consumed)
     throw new ApiError(
       400,
@@ -162,28 +174,38 @@ metaRoutes.get("/callback", async (c) => {
       `Meta did not grant: ${missingPermissions.join(", ")}. Add these permissions to the Meta login configuration and reconnect Facebook.`,
     );
   if (!debug.data.user_id) throw new GraphError("missing_meta_user", false);
+  if (consumed.target_user_id && consumed.target_user_id !== debug.data.user_id)
+    throw new ApiError(
+      400,
+      "wrong_facebook_account",
+      "You signed into a different Facebook account. Reconnect using the selected account, or choose Add Facebook account.",
+    );
+  const accountId = debug.data.user_id;
   const t = now();
   await c.env.DB.batch([
     statement(
       c.env,
-      `INSERT INTO meta_connections(workspace_id,meta_user_id,token_encrypted,token_expires_at,permissions_json,status,connected_by,created_at,updated_at) VALUES(?,?,?,?,?,'authorized',?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET meta_user_id=excluded.meta_user_id,token_encrypted=excluded.token_encrypted,token_expires_at=excluded.token_expires_at,permissions_json=excluded.permissions_json,status='authorized',last_error=NULL,connected_by=excluded.connected_by,updated_at=excluded.updated_at`,
+      `INSERT INTO meta_connections(workspace_id,meta_user_id,token_encrypted,token_expires_at,permissions_json,status,connected_by,created_at,updated_at,label,token_context) VALUES(?,?,?,?,?,'authorized',?,?,?,?, 'account') ON CONFLICT(workspace_id,meta_user_id) DO UPDATE SET token_encrypted=excluded.token_encrypted,token_context=excluded.token_context,token_expires_at=excluded.token_expires_at,permissions_json=excluded.permissions_json,status='authorized',last_error=NULL,connected_by=excluded.connected_by,updated_at=excluded.updated_at`,
       a.workspaceId,
       debug.data.user_id,
       await encrypt(
         c.env.TOKEN_ENCRYPTION_KEY,
         long.access_token,
-        `${a.workspaceId}:user`,
+        `${a.workspaceId}:user:${accountId}`,
       ),
       debug.expiresAt,
       JSON.stringify(granted),
       a.userId,
       t,
       t,
+      `Facebook account ${accountId}`,
     ),
     statement(
       c.env,
-      "UPDATE facebook_pages SET authorized=0,subscribed=0 WHERE workspace_id=?",
+      "UPDATE facebook_pages SET authorized=0,subscribed=0 WHERE workspace_id=? AND id IN (SELECT page_id FROM meta_account_pages WHERE workspace_id=? AND meta_user_id=?)",
       a.workspaceId,
+      a.workspaceId,
+      accountId,
     ),
     audit(c.env, a, "meta.authorized"),
   ]);
@@ -203,10 +225,18 @@ metaRoutes.get("/callback", async (c) => {
     for (const p of result.data) {
       externalId(p.id);
       if (!p.access_token) continue;
+      const owner = await one<{ meta_user_id: string }>(
+        c.env,
+        "SELECT meta_user_id FROM meta_account_pages WHERE workspace_id=? AND page_id=?",
+        a.workspaceId,
+        p.id,
+      );
+      // Shared Pages retain their original owner and source identity.
+      if (owner && owner.meta_user_id !== accountId) continue;
       pageUpdates.push(
         statement(
           c.env,
-          `INSERT INTO facebook_pages(workspace_id,id,name,token_encrypted,tasks_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(workspace_id,id) DO UPDATE SET name=excluded.name,token_encrypted=excluded.token_encrypted,tasks_json=excluded.tasks_json,last_error=NULL,updated_at=excluded.updated_at`,
+          `INSERT INTO facebook_pages(workspace_id,id,name,token_encrypted,tasks_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(workspace_id,id) DO UPDATE SET name=excluded.name,token_encrypted=excluded.token_encrypted,tasks_json=excluded.tasks_json,last_error=NULL,updated_at=excluded.updated_at WHERE NOT EXISTS(SELECT 1 FROM meta_account_pages owner WHERE owner.workspace_id=excluded.workspace_id AND owner.page_id=excluded.id AND owner.meta_user_id<>?)`,
           a.workspaceId,
           p.id,
           p.name,
@@ -218,6 +248,14 @@ metaRoutes.get("/callback", async (c) => {
           JSON.stringify(p.tasks || []),
           t,
           t,
+          accountId,
+        ),
+        statement(
+          c.env,
+          "INSERT OR IGNORE INTO meta_account_pages(workspace_id,page_id,meta_user_id) VALUES(?,?,?)",
+          a.workspaceId,
+          p.id,
+          accountId,
         ),
       );
     }
@@ -328,9 +366,11 @@ metaRoutes.post("/pages/select", async (c) => {
       ),
       statement(
         c.env,
-        "UPDATE meta_connections SET status='connected',last_error=NULL,updated_at=? WHERE workspace_id=?",
+        "UPDATE meta_connections SET status='connected',last_error=NULL,updated_at=? WHERE workspace_id=? AND meta_user_id IN (SELECT meta_user_id FROM meta_account_pages WHERE workspace_id=? AND page_id=?)",
         now(),
         a.workspaceId,
+        a.workspaceId,
+        pid,
       ),
       audit(c.env, a, "meta.page_connected", pid),
     ]);
@@ -501,12 +541,12 @@ metaRoutes.get("/connection-status", async (c) => {
   const a = c.get("auth"),
     connection = await one(
       c.env,
-      "SELECT status,permissions_json,token_expires_at,last_error,updated_at FROM meta_connections WHERE workspace_id=?",
+      "SELECT meta_user_id,label,status,permissions_json,token_expires_at,last_error,updated_at FROM meta_connections WHERE workspace_id=? ORDER BY created_at LIMIT 1",
       a.workspaceId,
     ),
     pages = await rows(
       c.env,
-      "SELECT id,name,authorized,subscribed,last_sync_at,last_webhook_at,last_error,token_expires_at FROM facebook_pages WHERE workspace_id=?",
+      "SELECT p.id,p.name,p.authorized,p.subscribed,p.last_sync_at,p.last_webhook_at,p.last_error,p.token_expires_at,m.meta_user_id AS account_id FROM facebook_pages p LEFT JOIN meta_account_pages m ON m.workspace_id=p.workspace_id AND m.page_id=p.id WHERE p.workspace_id=?",
       a.workspaceId,
     ),
     health = await one(
@@ -537,6 +577,24 @@ metaRoutes.get("/connection-status", async (c) => {
                 "Facebook token access has expired. Reconnect Facebook.",
             }
           : connection,
+      accounts: (
+        await rows(
+          c.env,
+          "SELECT meta_user_id,label,status,permissions_json,token_expires_at,last_error,updated_at FROM meta_connections WHERE workspace_id=? ORDER BY created_at,meta_user_id",
+          a.workspaceId,
+        )
+      ).map((account) =>
+        account.status !== "disconnected" &&
+        typeof account.token_expires_at === "string" &&
+        account.token_expires_at <= now()
+          ? {
+              ...account,
+              status: "needs_reauth",
+              last_error:
+                "Facebook token access has expired. Reconnect this account.",
+            }
+          : account,
+      ),
       pages: pages.map((p) =>
         typeof p.token_expires_at === "string" && p.token_expires_at <= now()
           ? {
@@ -551,63 +609,131 @@ metaRoutes.get("/connection-status", async (c) => {
     },
   });
 });
+metaRoutes.get("/accounts", async (c) => {
+  return c.json({
+    ok: true,
+    data: await rows(
+      c.env,
+      "SELECT meta_user_id,label,status FROM meta_connections WHERE workspace_id=? ORDER BY created_at,meta_user_id",
+      c.get("auth").workspaceId,
+    ),
+  });
+});
+metaRoutes.patch("/accounts/:id", async (c) => {
+  requireAdmin(c);
+  const a = c.get("auth"),
+    accountId = externalId(c.req.param("id")),
+    b = await body(c);
+  keys(b, ["label"]);
+  const label = text(b.label, "account name", 100);
+  if (
+    !(await one(
+      c.env,
+      "SELECT 1 FROM meta_connections WHERE workspace_id=? AND meta_user_id=?",
+      a.workspaceId,
+      accountId,
+    ))
+  )
+    throw new ApiError(404, "not_found", "Facebook account not found.");
+  await c.env.DB.batch([
+    statement(
+      c.env,
+      "UPDATE meta_connections SET label=?,updated_at=? WHERE workspace_id=? AND meta_user_id=?",
+      label,
+      now(),
+      a.workspaceId,
+      accountId,
+    ),
+    audit(c.env, a, "meta.account_renamed", accountId),
+  ]);
+  return c.json({ ok: true, data: { label } });
+});
 metaRoutes.post("/disconnect", async (c) => {
   requireAdmin(c);
   const a = c.get("auth"),
-    connection = await one<{ token_encrypted: string }>(
-      c.env,
-      "SELECT token_encrypted FROM meta_connections WHERE workspace_id=?",
-      a.workspaceId,
+    b = await body(c);
+  keys(b, ["accountId"]);
+  if (!b.accountId)
+    throw new ApiError(
+      400,
+      "account_required",
+      "Select the Facebook account to disconnect.",
     );
-  let revoked = !connection;
-  if (connection) {
+  const accountId = externalId(b.accountId);
+  const connection = await one<{
+    token_encrypted: string;
+    token_context: string;
+  }>(
+    c.env,
+    "SELECT token_encrypted,token_context FROM meta_connections WHERE workspace_id=? AND meta_user_id=?",
+    a.workspaceId,
+    accountId,
+  );
+  if (!connection)
+    throw new ApiError(404, "not_found", "Facebook account not found.");
+  let revoked = !connection.token_encrypted;
+  if (connection.token_encrypted)
     try {
       const token = await decrypt(
         c.env.TOKEN_ENCRYPTION_KEY,
         connection.token_encrypted,
-        `${a.workspaceId}:user`,
+        connection.token_context === "account"
+          ? `${a.workspaceId}:user:${accountId}`
+          : `${a.workspaceId}:user`,
       );
-      const r = await graph<{ success: boolean }>(
-        c.env,
-        "me/permissions",
-        token,
-        {},
-        "DELETE",
-      );
-      revoked = r.success === true;
+      revoked =
+        (
+          await graph<{ success: boolean }>(
+            c.env,
+            "me/permissions",
+            token,
+            {},
+            "DELETE",
+          )
+        ).success === true;
     } catch {
-      /* Report revocation failure without retaining credentials. */
+      /* Local credentials are removed even if Meta is unavailable. */
     }
-  }
+  const pageScope =
+    "SELECT page_id FROM meta_account_pages WHERE workspace_id=? AND meta_user_id=?";
   await c.env.DB.batch([
     statement(
       c.env,
-      "DELETE FROM meta_connections WHERE workspace_id=?",
-      a.workspaceId,
-    ),
-    statement(
-      c.env,
-      "UPDATE facebook_pages SET token_encrypted='',authorized=0,subscribed=0,last_error=NULL,updated_at=? WHERE workspace_id=?",
+      "UPDATE meta_connections SET token_encrypted='',status='disconnected',last_error=NULL,updated_at=? WHERE workspace_id=? AND meta_user_id=?",
       now(),
       a.workspaceId,
+      accountId,
     ),
     statement(
       c.env,
-      "UPDATE instant_forms SET selected=0 WHERE workspace_id=?",
-      a.workspaceId,
-    ),
-    statement(
-      c.env,
-      "UPDATE sync_jobs SET status='cancelled',lease_token=NULL,lease_until=NULL,last_error=NULL,updated_at=? WHERE workspace_id=? AND status IN('pending','running','dead')",
+      `UPDATE facebook_pages SET token_encrypted='',authorized=0,subscribed=0,last_error=NULL,updated_at=? WHERE workspace_id=? AND id IN (${pageScope})`,
       now(),
       a.workspaceId,
+      a.workspaceId,
+      accountId,
     ),
     statement(
       c.env,
-      "DELETE FROM oauth_states WHERE workspace_id=?",
+      `UPDATE instant_forms SET selected=0 WHERE workspace_id=? AND page_id IN (${pageScope})`,
       a.workspaceId,
+      a.workspaceId,
+      accountId,
     ),
-    audit(c.env, a, "meta.disconnected"),
+    statement(
+      c.env,
+      `UPDATE sync_jobs SET status='cancelled',lease_token=NULL,lease_until=NULL,last_error=NULL,updated_at=? WHERE workspace_id=? AND page_id IN (${pageScope}) AND status IN ('pending','running','dead')`,
+      now(),
+      a.workspaceId,
+      a.workspaceId,
+      accountId,
+    ),
+    statement(
+      c.env,
+      "DELETE FROM oauth_states WHERE workspace_id=? AND target_user_id=?",
+      a.workspaceId,
+      accountId,
+    ),
+    audit(c.env, a, "meta.disconnected", accountId),
   ]);
   return c.json({
     ok: true,
@@ -615,8 +741,8 @@ metaRoutes.post("/disconnect", async (c) => {
       disconnected: true,
       revoked,
       message: revoked
-        ? "Facebook disconnected and permissions revoked. CRM records were retained."
-        : "Local credentials removed. Meta revocation could not be confirmed; remove the app in Facebook Business Integrations. CRM records were retained.",
+        ? "Selected Facebook account disconnected. CRM records and other accounts were retained."
+        : "Selected account credentials removed. Meta revocation could not be confirmed; remove this app in that Facebook account's Business Integrations. Other accounts and CRM records were retained.",
     },
   });
 });

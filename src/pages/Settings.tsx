@@ -7,13 +7,23 @@ import { ErrorState, Loading, dateTime } from "../components/States";
 interface Page {
   id: string;
   name: string;
+  account_id: string | null;
   authorized: number;
   subscribed: number;
   last_sync_at: string | null;
   last_webhook_at: string | null;
   last_error: string | null;
 }
+interface FacebookAccount {
+  meta_user_id: string;
+  label: string;
+  status: string;
+  permissions_json: string;
+  token_expires_at: string | null;
+  last_error: string | null;
+}
 interface Connection {
+  accounts: FacebookAccount[];
   configured: boolean;
   webhookConfigured: boolean;
   callbackUri: string | null;
@@ -69,7 +79,8 @@ export function Settings({
   const [error, setError] = useState(""),
     [message, setMessage] = useState(""),
     [busy, setBusy] = useState(false),
-    [disconnect, setDisconnect] = useState(false);
+    [disconnect, setDisconnect] = useState(false),
+    [selectedAccount, setSelectedAccount] = useState("");
   const admin = identity.role !== "Agent";
   async function act(fn: () => Promise<unknown>, success = "Saved.") {
     setBusy(true);
@@ -92,6 +103,10 @@ export function Settings({
       <Loading />
     );
   const d = r.data;
+  const connection =
+    d.accounts.find((a) => a.meta_user_id === selectedAccount) ||
+    d.accounts[0] ||
+    null;
   return (
     <>
       {error && (
@@ -107,12 +122,82 @@ export function Settings({
       <ThemeSettings />
       <div className="settings-grid">
         <section className="panel settings-card">
-          <h2>Facebook connection</h2>
+          <h2>Facebook accounts</h2>
+          <label className="field-label">
+            Manage account
+            <select
+              value={connection?.meta_user_id || ""}
+              onChange={(e) => {
+                setSelectedAccount(e.target.value);
+                setDisconnect(false);
+              }}
+            >
+              {!d.accounts.length && (
+                <option value="">No accounts connected</option>
+              )}
+              {d.accounts.map((a) => (
+                <option key={a.meta_user_id} value={a.meta_user_id}>
+                  {a.label || a.meta_user_id} � {a.status}
+                </option>
+              ))}
+            </select>
+          </label>
+          {admin && (
+            <button
+              className="button primary"
+              disabled={busy || !d.configured}
+              onClick={() =>
+                act(async () => {
+                  const result = await api<{ url: string }>("/meta/connect");
+                  window.location.assign(result.url);
+                }, "Opening Facebook�")
+              }
+            >
+              Add Facebook account
+            </button>
+          )}
+          <p>
+            To add a different login, sign into that Facebook account before
+            authorizing. Existing accounts remain saved. Shared Pages retain
+            their original account.
+          </p>
+          {admin && connection && (
+            <form
+              key={connection.meta_user_id}
+              className="task-form"
+              onSubmit={(e) => {
+                e.preventDefault();
+                const label = new FormData(e.currentTarget).get("label");
+                act(
+                  () =>
+                    write(
+                      `/meta/accounts/${connection.meta_user_id}`,
+                      { label },
+                      "PATCH",
+                    ),
+                  "Account name saved.",
+                );
+              }}
+            >
+              <label className="field-label">
+                Account name
+                <input
+                  name="label"
+                  defaultValue={connection.label}
+                  required
+                  maxLength={100}
+                />
+              </label>
+              <button className="button secondary" disabled={busy}>
+                Save name
+              </button>
+            </form>
+          )}
           <span
-            className={`status ${d.connection?.status === "connected" ? "converted" : "rejected"}`}
+            className={`status ${connection?.status === "connected" ? "converted" : "rejected"}`}
           >
             <span />
-            {d.connection?.status || "Not connected"}
+            {connection?.status || "Not connected"}
           </span>
           <p>
             {d.configured
@@ -125,12 +210,14 @@ export function Settings({
               disabled={!d.configured || busy}
               onClick={() =>
                 act(async () => {
-                  const result = await api<{ url: string }>("/meta/connect");
+                  const result = await api<{ url: string }>(
+                    `/meta/connect${connection ? `?accountId=${connection.meta_user_id}` : ""}`,
+                  );
                   window.location.assign(result.url);
                 }, "Opening Facebook…")
               }
             >
-              Connect / reconnect Facebook
+              Reconnect selected account
             </button>
           )}
           <small className="settings-hint">
@@ -149,16 +236,16 @@ export function Settings({
             <div>
               <dt>Token access deadline</dt>
               <dd>
-                {d.connection?.token_expires_at
-                  ? dateTime(d.connection.token_expires_at)
+                {connection?.token_expires_at
+                  ? dateTime(connection.token_expires_at)
                   : "Not provided"}
               </dd>
             </div>
             <div>
               <dt>Granted permissions</dt>
               <dd>
-                {d.connection
-                  ? JSON.parse(d.connection.permissions_json).join(", ")
+                {connection
+                  ? JSON.parse(connection.permissions_json).join(", ")
                   : "None"}
               </dd>
             </div>
@@ -168,16 +255,16 @@ export function Settings({
             <br />
             Webhook callback: {d.webhookUri || "Not configured"}
           </p>
-          {d.connection?.last_error && (
-            <p className="form-error">{d.connection.last_error}</p>
+          {connection?.last_error && (
+            <p className="form-error">{connection.last_error}</p>
           )}
-          {admin && d.connection && (
+          {admin && connection && (
             <div className="danger-zone">
               {disconnect ? (
                 <>
                   <p>
-                    Remove stored Meta credentials and attempt app permission
-                    revocation. Existing CRM records stay saved.
+                    Remove this account�s stored Meta credentials and attempt
+                    app permission revocation. Existing CRM records stay saved.
                   </p>
                   <button
                     className="button danger"
@@ -186,7 +273,7 @@ export function Settings({
                       act(async () => {
                         const res = await write<{ message: string }>(
                           "/meta/disconnect",
-                          {},
+                          { accountId: connection.meta_user_id },
                         );
                         setDisconnect(false);
                         return res.message;
@@ -221,57 +308,61 @@ export function Settings({
               Pages.
             </p>
           )}
-          {d.pages.map((p) => (
-            <article className="page-setting" key={p.id}>
-              <h3>{p.name}</h3>
-              <span
-                className={`status ${p.authorized && p.subscribed ? "converted" : "rejected"}`}
-              >
-                <span />
-                {p.authorized && p.subscribed
-                  ? "Page subscription confirmed"
-                  : "Not connected"}
-              </span>
-              <small className="settings-hint">
-                Page {p.id}
-                <br />
-                Last retrieval:{" "}
-                {p.last_sync_at ? dateTime(p.last_sync_at) : "Never"}
-                <br />
-                Last signed webhook:{" "}
-                {p.last_webhook_at ? dateTime(p.last_webhook_at) : "Never"}
-              </small>
-              {p.last_error && <p className="form-error">{p.last_error}</p>}
-              {admin && (
-                <div className="contact-links">
-                  <button
-                    className="button secondary"
-                    disabled={busy}
-                    onClick={() =>
-                      act(
-                        () => write("/meta/pages/select", { pageId: p.id }),
-                        "Page and subscription confirmed. Select forms in Instant forms.",
-                      )
-                    }
-                  >
-                    {p.authorized ? "Verify Page again" : "Connect this Page"}
-                  </button>
-                  <button
-                    className="button secondary"
-                    disabled={busy || !p.authorized}
-                    onClick={() =>
-                      act(
-                        () => api(`/meta/forms?pageId=${p.id}`),
-                        "Forms refreshed.",
-                      )
-                    }
-                  >
-                    Refresh forms
-                  </button>
-                </div>
-              )}
-            </article>
-          ))}
+          {d.pages
+            .filter(
+              (p) => !connection || p.account_id === connection.meta_user_id,
+            )
+            .map((p) => (
+              <article className="page-setting" key={p.id}>
+                <h3>{p.name}</h3>
+                <span
+                  className={`status ${p.authorized && p.subscribed ? "converted" : "rejected"}`}
+                >
+                  <span />
+                  {p.authorized && p.subscribed
+                    ? "Page subscription confirmed"
+                    : "Not connected"}
+                </span>
+                <small className="settings-hint">
+                  Page {p.id}
+                  <br />
+                  Last retrieval:{" "}
+                  {p.last_sync_at ? dateTime(p.last_sync_at) : "Never"}
+                  <br />
+                  Last signed webhook:{" "}
+                  {p.last_webhook_at ? dateTime(p.last_webhook_at) : "Never"}
+                </small>
+                {p.last_error && <p className="form-error">{p.last_error}</p>}
+                {admin && (
+                  <div className="contact-links">
+                    <button
+                      className="button secondary"
+                      disabled={busy}
+                      onClick={() =>
+                        act(
+                          () => write("/meta/pages/select", { pageId: p.id }),
+                          "Page and subscription confirmed. Select forms in Instant forms.",
+                        )
+                      }
+                    >
+                      {p.authorized ? "Verify Page again" : "Connect this Page"}
+                    </button>
+                    <button
+                      className="button secondary"
+                      disabled={busy || !p.authorized}
+                      onClick={() =>
+                        act(
+                          () => api(`/meta/forms?pageId=${p.id}`),
+                          "Forms refreshed.",
+                        )
+                      }
+                    >
+                      Refresh forms
+                    </button>
+                  </div>
+                )}
+              </article>
+            ))}
         </section>
         <section className="panel settings-card full-width">
           <h2>Sync & ingestion health</h2>

@@ -21,6 +21,15 @@ export function leadFilter(params: URLSearchParams, workspace: string) {
       );
     args.push(...Array(8).fill(term));
   }
+  const account = params.get("accountId");
+  if (account) {
+    if (!/^\d{1,128}$/.test(account))
+      throw new ApiError(400, "validation", "Invalid Facebook account.");
+    clauses.push(
+      "EXISTS(SELECT 1 FROM meta_account_pages am WHERE am.workspace_id=l.workspace_id AND am.page_id=l.page_id AND am.meta_user_id=?)",
+    );
+    args.push(account);
+  }
   for (const [key, col] of [
     ["status", "l.status"],
     ["form", "l.form_id"],

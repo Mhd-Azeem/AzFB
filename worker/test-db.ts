@@ -1,19 +1,22 @@
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import type { Env } from "./types";
-export function testDatabase() {
+export function testDatabase(through = 6) {
   const sqlite = new DatabaseSync(":memory:");
   sqlite.exec("PRAGMA foreign_keys=ON");
+  const migrate = (file: string) =>
+    sqlite.exec(
+      readFileSync(new URL(`../migrations/${file}`, import.meta.url), "utf8"),
+    );
   for (const file of [
     "0001_core.sql",
     "0002_ingestion.sql",
     "0003_reconciliation.sql",
     "0004_webhook_inbox.sql",
     "0005_session_rotation.sql",
-  ])
-    sqlite.exec(
-      readFileSync(new URL(`../migrations/${file}`, import.meta.url), "utf8"),
-    );
+    "0006_meta_accounts.sql",
+  ].slice(0, through))
+    migrate(file);
   function prep(sql: string, args: unknown[] = []) {
     const execute = () => {
       const stmt = sqlite.prepare(sql),
@@ -52,5 +55,5 @@ export function testDatabase() {
       return { count: 0, duration: 0 };
     },
   } as unknown as Env["DB"];
-  return { DB, sqlite, close: () => sqlite.close() };
+  return { DB, sqlite, migrate, close: () => sqlite.close() };
 }

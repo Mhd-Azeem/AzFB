@@ -54,3 +54,5 @@ Every JSON write requires `Content-Type: application/json`, an explicitly allowe
 UTC `from`/`to` dates are real `YYYY-MM-DD` dates and inclusive; implementation uses an exclusive next-day upper bound. Dashboard/analytics default to the last 30 UTC calendar days and accept the same filters. Total/converted figures refer to that range, not a mixture of all-time and recent data. Follow-ups due uses current UTC time across the whole workspace. `dueAt` must be an explicit ISO timestamp including timezone. Notes, statuses, assignment and task completion are never overwritten by a historical import.
 
 The five initial stages are shared through `shared/contracts.ts` and enforced by SQL. Future custom stages require a versioned schema/API/UI change; this release does not expose unvalidated arbitrary stage names.
+
+Multi-account additions and changed disconnect payload: see [MULTI-ACCOUNT.md](MULTI-ACCOUNT.md). Lead listing and export accept `accountId`. Disconnect requires `{accountId}` and affects only that account.
