@@ -295,6 +295,175 @@ describe("authentication, authorization and workspace isolation", () => {
     ).json()) as { data: { items: { whatsapp_phone: string }[] } };
     expect(remapped.data.items[0].whatsapp_phone).toBe("+918074022480");
   });
+  it("encodes an editable WhatsApp draft and rejects oversized drafts before recording contact", async () => {
+    await provision();
+    const session = await login();
+    const wid = (await one<{ id: string }>(env, "SELECT id FROM workspaces"))!
+      .id;
+    await seed(wid);
+    await saveLead(env, wid, "111", "222", fixture);
+    const lead = (await one<{ id: string }>(
+      env,
+      "SELECT id FROM leads WHERE workspace_id=?",
+      wid,
+    ))!;
+    const path = `/leads/${lead.id}/whatsapp`;
+    expect(
+      (
+        await req(
+          path,
+          "POST",
+          { phone: "+94771234567", message: "x".repeat(2001) },
+          session,
+        )
+      ).status,
+    ).toBe(400);
+    expect(
+      (await one<{ status: string }>(
+        env,
+        "SELECT status FROM leads WHERE id=?",
+        lead.id,
+      ))!.status,
+    ).toBe("New");
+    const draft =
+      "Hello Asha & family!\nGreetings from JobMarketing. + Best wishes";
+    const result = await req(
+      path,
+      "POST",
+      { phone: "+94771234567", message: draft },
+      session,
+    );
+    expect(result.status).toBe(200);
+    const url = new URL(
+      ((await result.json()) as { data: { url: string } }).data.url,
+    );
+    expect(url.origin).toBe("https://wa.me");
+    expect(url.searchParams.get("text")).toBe(draft);
+    expect(
+      (
+        await rows(
+          env,
+          "SELECT detail FROM lead_activities WHERE lead_id=?",
+          lead.id,
+        )
+      ).some((a) => String(a.detail).includes(draft)),
+    ).toBe(false);
+  });
+  it("counts and filters follow-ups by the supplied local day, excludes completed tasks and isolates notification ownership", async () => {
+    await provision();
+    const session = await login();
+    const me = (
+      (await (await req("/auth/me", "GET", undefined, session)).json()) as {
+        data: { workspaceId: string; userId: string };
+      }
+    ).data;
+    const start = new Date();
+    start.setUTCHours(0, 0, 0, 0);
+    const end = new Date(start.getTime() + 86400000);
+    const today = new Date(start.getTime() + 12 * 3600000).toISOString();
+    const past = new Date(start.getTime() - 3600000).toISOString();
+    const future = new Date(end.getTime() + 9 * 3600000).toISOString();
+    const day = new URLSearchParams({
+      todayFrom: start.toISOString(),
+      todayTo: end.toISOString(),
+      assignedTo: me.userId,
+    });
+    const ids: string[] = [];
+    for (const [title, dueAt] of [
+      ["Yesterday", past],
+      ["Today", today],
+      ["Tomorrow", future],
+      ["Completed", past],
+    ]) {
+      const response = await req(
+        "/tasks",
+        "POST",
+        { title, dueAt, priority: "Normal" },
+        session,
+      );
+      expect(response.status).toBe(201);
+      ids.push(((await response.json()) as { data: { id: string } }).data.id);
+    }
+    await req(`/tasks/${ids[3]}`, "PATCH", { completed: true }, session);
+    for (const [filter, expected] of [
+      ["today", 1],
+      ["upcoming", 1],
+      ["overdue", 1 + (today < now() ? 1 : 0)],
+    ] as const) {
+      const result = await req(
+        `/tasks?${day}&due=${filter}`,
+        "GET",
+        undefined,
+        session,
+      );
+      expect(result.status).toBe(200);
+      const data = (
+        (await result.json()) as {
+          data: {
+            total: number;
+            summary: { open: number; today: number; upcoming: number };
+          };
+        }
+      ).data;
+      expect(data.total).toBe(expected);
+      expect(data.summary.open).toBe(3);
+      expect(data.summary.today).toBe(1);
+      expect(data.summary.upcoming).toBe(1);
+    }
+    expect(
+      (await req(`/tasks?${day}&due=invalid`, "GET", undefined, session))
+        .status,
+    ).toBe(400);
+    expect(
+      (await req("/notifications?todayFrom=invalid", "GET", undefined, session))
+        .status,
+    ).toBe(400);
+    await statement(
+      env,
+      "INSERT INTO workspaces(id,name,created_at,updated_at) VALUES('reminder-other','Other',?,?)",
+      now(),
+      now(),
+    ).run();
+    await statement(
+      env,
+      "INSERT INTO workspace_members(workspace_id,user_id,role,created_at) VALUES('reminder-other',?,'Owner',?)",
+      me.userId,
+      now(),
+    ).run();
+    await statement(
+      env,
+      "INSERT INTO tasks(id,workspace_id,title,due_at,priority,assigned_to,created_by,created_at,updated_at) VALUES('foreign-reminder','reminder-other','Foreign reminder',?,'High',?,?,?,?)",
+      past,
+      me.userId,
+      me.userId,
+      now(),
+      now(),
+    ).run();
+    const notifications = await req(
+      `/notifications?${day}`,
+      "GET",
+      undefined,
+      session,
+    );
+    const raw = await notifications.text();
+    expect(raw).not.toContain("Foreign reminder");
+    const data = (
+      JSON.parse(raw) as {
+        data: {
+          tasks: { title: string }[];
+          followups: { overdue: number; today: number };
+        };
+      }
+    ).data;
+    expect(data.followups.today).toBe(1);
+    expect(data.followups.overdue).toBe(1 + (today < now() ? 1 : 0));
+    expect(data.tasks.map((t) => t.title)).toEqual(["Yesterday", "Today"]);
+    await req(`/tasks/${ids[0]}`, "PATCH", { dueAt: future }, session);
+    const after = (await (
+      await req(`/tasks?${day}&due=overdue`, "GET", undefined, session)
+    ).json()) as { data: { total: number } };
+    expect(after.data.total).toBe(today < now() ? 1 : 0);
+  });
   it("records WhatsApp attempts, validates numbers, preserves later stages and requires authentication", async () => {
     await provision();
     const session = await login();

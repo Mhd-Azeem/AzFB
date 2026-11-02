@@ -268,89 +268,171 @@ export function Leads({
           </p>
         </Empty>
       ) : (
-        <div className="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th>LEAD</th>
-                <th>FORM / PAGE</th>
-                <th>STATUS</th>
-                <th>SUBMITTED · UTC</th>
-                <th>ASSIGNED</th>
-                <th>WHATSAPP</th>
-                <th>
-                  <span className="sr-only">Details</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {r.data.items.map((l, i) => (
-                <tr key={l.id}>
-                  <td>
-                    <button className="lead-name" onClick={() => onOpen(l.id)}>
-                      <span className={`person person-${i % 4}`}>
-                        {l.name.slice(0, 2).toUpperCase()}
-                      </span>
-                      <span>
-                        <strong>{l.name}</strong>
-                        <small>
-                          {l.email ||
-                            l.whatsapp_phone ||
-                            l.phone ||
-                            "No contact supplied"}
-                        </small>
-                      </span>
-                    </button>
-                  </td>
-                  <td>
-                    {l.form_name}
-                    <small className="campaign">
-                      {l.page_name} · {l.campaign || l.source}
-                    </small>
-                  </td>
-                  <td>
-                    <span className={`status ${l.status.toLowerCase()}`}>
-                      <span />
-                      {l.status}
-                    </span>
-                  </td>
-                  <td>{dateTime(l.submitted_at)}</td>
-                  <td>
-                    {members.data?.find((m) => m.id === l.assigned_to)?.name ||
-                      "Unassigned"}
-                  </td>
-                  <td>
-                    <WhatsAppButton
-                      leadId={l.id}
-                      name={l.name}
-                      phone={l.whatsapp_phone || l.phone}
-                      compact
-                      onError={setContactError}
-                    />
-                    {!whatsappNumber(l.whatsapp_phone || l.phone) && (
+        <>
+          <div className="mobile-lead-cards">
+            {r.data.items.map((l) => (
+              <article className="mobile-lead-card" key={l.id}>
+                <div className="mobile-lead-heading">
+                  <button className="lead-name" onClick={() => onOpen(l.id)}>
+                    <strong>{l.name}</strong>
+                  </button>
+                  <span className={`status ${l.status.toLowerCase()}`}>
+                    <span />
+                    {l.status}
+                  </span>
+                </div>
+                <dl>
+                  <div>
+                    <dt>WhatsApp</dt>
+                    <dd>{l.whatsapp_phone || l.phone || "Not supplied"}</dd>
+                  </div>
+                  {l.email && (
+                    <div>
+                      <dt>Email</dt>
+                      <dd>{l.email}</dd>
+                    </div>
+                  )}
+                  <div>
+                    <dt>Form / Page</dt>
+                    <dd>
+                      {l.form_name} / {l.page_name}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Submitted</dt>
+                    <dd>{dateTime(l.submitted_at)}</dd>
+                  </div>
+                  <div>
+                    <dt>Assigned</dt>
+                    <dd>
+                      {members.data?.find((m) => m.id === l.assigned_to)
+                        ?.name || "Unassigned"}
+                    </dd>
+                  </div>
+                </dl>
+                {l.next_followup_at && (
+                  <p
+                    className={
+                      l.next_followup_at < new Date().toISOString()
+                        ? "overdue"
+                        : "settings-hint"
+                    }
+                  >
+                    Follow-up: {dateTime(l.next_followup_at)}
+                  </p>
+                )}
+                <div className="mobile-lead-actions">
+                  <WhatsAppButton
+                    leadId={l.id}
+                    name={l.name}
+                    business={l.page_name}
+                    phone={l.whatsapp_phone || l.phone}
+                    compact
+                    onError={setContactError}
+                  />
+                  <button
+                    className="button secondary"
+                    onClick={() => onOpen(l.id)}
+                  >
+                    Details / follow-up
+                  </button>
+                </div>
+                {!whatsappNumber(l.whatsapp_phone || l.phone) && (
+                  <button className="text-button" onClick={() => onOpen(l.id)}>
+                    Add / fix WhatsApp number
+                  </button>
+                )}
+              </article>
+            ))}
+          </div>
+          <div className="table-scroll desktop-leads-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>LEAD</th>
+                  <th>FORM / PAGE</th>
+                  <th>STATUS</th>
+                  <th>SUBMITTED · UTC</th>
+                  <th>ASSIGNED</th>
+                  <th>WHATSAPP</th>
+                  <th>
+                    <span className="sr-only">Details</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {r.data.items.map((l, i) => (
+                  <tr key={l.id}>
+                    <td>
                       <button
-                        type="button"
-                        className="text-button"
+                        className="lead-name"
                         onClick={() => onOpen(l.id)}
                       >
-                        Add / fix number
+                        <span className={`person person-${i % 4}`}>
+                          {l.name.slice(0, 2).toUpperCase()}
+                        </span>
+                        <span>
+                          <strong>{l.name}</strong>
+                          <small>
+                            {l.email ||
+                              l.whatsapp_phone ||
+                              l.phone ||
+                              "No contact supplied"}
+                          </small>
+                        </span>
                       </button>
-                    )}
-                  </td>
-                  <td>
-                    <button
-                      className="icon-button"
-                      aria-label={`View ${l.name}`}
-                      onClick={() => onOpen(l.id)}
-                    >
-                      <ArrowUpRight size={17} />
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+                    </td>
+                    <td>
+                      {l.form_name}
+                      <small className="campaign">
+                        {l.page_name} · {l.campaign || l.source}
+                      </small>
+                    </td>
+                    <td>
+                      <span className={`status ${l.status.toLowerCase()}`}>
+                        <span />
+                        {l.status}
+                      </span>
+                    </td>
+                    <td>{dateTime(l.submitted_at)}</td>
+                    <td>
+                      {members.data?.find((m) => m.id === l.assigned_to)
+                        ?.name || "Unassigned"}
+                    </td>
+                    <td>
+                      <WhatsAppButton
+                        leadId={l.id}
+                        name={l.name}
+                        business={l.page_name}
+                        phone={l.whatsapp_phone || l.phone}
+                        compact
+                        onError={setContactError}
+                      />
+                      {!whatsappNumber(l.whatsapp_phone || l.phone) && (
+                        <button
+                          type="button"
+                          className="text-button"
+                          onClick={() => onOpen(l.id)}
+                        >
+                          Add / fix number
+                        </button>
+                      )}
+                    </td>
+                    <td>
+                      <button
+                        className="icon-button"
+                        aria-label={`View ${l.name}`}
+                        onClick={() => onOpen(l.id)}
+                      >
+                        <ArrowUpRight size={17} />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
       )}
       <div className="table-footer">
         <span>{r.data?.total || 0} matching leads · Dates are UTC</span>

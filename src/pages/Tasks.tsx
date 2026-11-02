@@ -1,9 +1,15 @@
+import {
+  localDayWindow,
+  localDateInput,
+  nextFollowup,
+  followupLabel,
+} from "../followups";
 import { useState } from "react";
 import type { Identity, ListResult, TaskRecord } from "../../shared/contracts";
 import { useResource } from "../hooks/useResource";
 import { refresh, write } from "../api";
 import { TaskForm } from "../components/TaskForm";
-import { Empty, ErrorState, Loading, dateTime } from "../components/States";
+import { Empty, ErrorState, Loading } from "../components/States";
 export function Tasks({
   identity,
   onLead,
@@ -13,15 +19,79 @@ export function Tasks({
 }) {
   const [page, setPage] = useState(1),
     [onlyOpen, setOnlyOpen] = useState(true),
+    [due, setDue] = useState(""),
+    [scope, setScope] = useState("mine"),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
-  const r = useResource<ListResult<TaskRecord>>(
-    `/tasks?page=${page}&pageSize=25&state=${onlyOpen ? "open" : "all"}`,
-  );
+  const day = localDayWindow();
+  const params = new URLSearchParams({
+    page: String(page),
+    pageSize: "25",
+    state: onlyOpen ? "open" : "all",
+    due,
+    ...day,
+    ...(scope === "mine" ? { assignedTo: identity.userId } : {}),
+  });
+  const r = useResource<
+    ListResult<TaskRecord> & {
+      summary: {
+        open: number;
+        overdue: number;
+        today: number;
+        upcoming: number;
+      };
+    }
+  >(`/tasks?${params}`, 300000);
   return (
     <div className="settings-grid">
       <section className="panel settings-card">
         <h2>Follow-up tasks</h2>
+        <label className="field-label">
+          Show follow-ups
+          <select
+            value={scope}
+            onChange={(e) => {
+              setScope(e.target.value);
+              setPage(1);
+            }}
+          >
+            <option value="mine">Assigned to me</option>
+            <option value="workspace">Whole workspace</option>
+          </select>
+        </label>
+        <div
+          className="followup-summary"
+          role="group"
+          aria-label="Filter follow-ups by due date"
+        >
+          {[
+            { id: "", label: "Open", count: r.data?.summary.open },
+            { id: "overdue", label: "Overdue", count: r.data?.summary.overdue },
+            { id: "today", label: "Due today", count: r.data?.summary.today },
+            {
+              id: "upcoming",
+              label: "Upcoming",
+              count: r.data?.summary.upcoming,
+            },
+          ].map((item) => (
+            <button
+              key={item.id}
+              className={`button ${due === item.id ? "primary" : "secondary"}`}
+              aria-pressed={due === item.id}
+              onClick={() => {
+                setDue(item.id);
+                setOnlyOpen(true);
+                setPage(1);
+              }}
+            >
+              {item.label}: {item.count ?? 0}
+            </button>
+          ))}
+        </div>
+        <p className="settings-hint">
+          Times use your device's local time. Due today includes any tasks
+          already overdue today.
+        </p>
         <label className="check-label">
           <input
             type="checkbox"
@@ -82,7 +152,9 @@ export function Tasks({
                     : ""
                 }
               >
-                {dateTime(t.due_at)} · {t.priority}
+                {new Date(t.due_at).toLocaleString()} -{" "}
+                {followupLabel(t.due_at, Boolean(t.completed_at))} ·{" "}
+                {t.priority}
               </p>
               <small>{t.assignee_name || "Unassigned"}</small>
               {t.lead_id && (
@@ -91,6 +163,34 @@ export function Tasks({
                   onClick={() => onLead(t.lead_id!)}
                 >
                   {t.lead_name || "Lead"} →
+                </button>
+              )}
+              {!t.completed_at && (
+                <button
+                  className="text-button"
+                  disabled={
+                    busy ||
+                    (identity.role === "Agent" &&
+                      t.assigned_to !== identity.userId)
+                  }
+                  onClick={async () => {
+                    setBusy(true);
+                    setError("");
+                    try {
+                      await write(
+                        `/tasks/${t.id}`,
+                        { dueAt: nextFollowup(1) },
+                        "PATCH",
+                      );
+                      refresh();
+                    } catch (e) {
+                      setError((e as Error).message);
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  Remind me tomorrow at 9 AM
                 </button>
               )}
               <details>
@@ -106,9 +206,7 @@ export function Tasks({
                         `/tasks/${t.id}`,
                         {
                           title: f.get("title"),
-                          dueAt: new Date(
-                            String(f.get("due")) + "Z",
-                          ).toISOString(),
+                          dueAt: new Date(String(f.get("due"))).toISOString(),
                           priority: f.get("priority"),
                         },
                         "PATCH",
@@ -130,9 +228,9 @@ export function Tasks({
                   />
                   <input
                     name="due"
-                    aria-label="Due time UTC"
+                    aria-label="Due time in your local timezone"
                     type="datetime-local"
-                    defaultValue={t.due_at.slice(0, 16)}
+                    defaultValue={localDateInput(t.due_at)}
                     required
                   />
                   <select

@@ -26,6 +26,7 @@ export interface LeadRecord {
   email: string;
   phone: string;
   whatsapp_phone: string;
+  next_followup_at: string | null;
   campaign: string;
   ad_id: string | null;
   submitted_at: string;

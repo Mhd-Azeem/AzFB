@@ -129,6 +129,7 @@ function App() {
         </p>
       )}
       <Notifications
+        onLead={setSelected}
         onLeads={() => openLeads()}
         onTasks={() => setView("Tasks")}
       />

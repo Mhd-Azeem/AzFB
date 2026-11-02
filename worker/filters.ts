@@ -86,7 +86,7 @@ export function leadFilter(params: URLSearchParams, workspace: string) {
 }
 export const leadJoins =
   "FROM leads l LEFT JOIN instant_forms f ON f.workspace_id=l.workspace_id AND f.id=l.form_id LEFT JOIN facebook_pages p ON p.workspace_id=l.workspace_id AND p.id=l.page_id";
-export const leadColumns = `l.id,l.workspace_id,l.lead_id,l.form_id,l.page_id,l.name,l.email,l.phone,l.campaign,l.ad_id,l.submitted_at,l.status,l.assigned_to,l.source,l.created_at,l.updated_at,COALESCE(f.name,l.form_id) AS form_name,COALESCE(p.name,l.page_id) AS page_name,COALESCE(${whatsappPhoneColumn},'') AS whatsapp_phone`;
+export const leadColumns = `l.id,l.workspace_id,l.lead_id,l.form_id,l.page_id,l.name,l.email,l.phone,l.campaign,l.ad_id,l.submitted_at,l.status,l.assigned_to,l.source,l.created_at,l.updated_at,COALESCE(f.name,l.form_id) AS form_name,COALESCE(p.name,l.page_id) AS page_name,COALESCE(${whatsappPhoneColumn},'') AS whatsapp_phone,(SELECT MIN(ft.due_at) FROM tasks ft WHERE ft.workspace_id=l.workspace_id AND ft.lead_id=l.id AND ft.completed_at IS NULL) AS next_followup_at`;
 export function pagination(params: URLSearchParams) {
   const page = Number(params.get("page") || 1),
     pageSize = Number(params.get("pageSize") || 25);

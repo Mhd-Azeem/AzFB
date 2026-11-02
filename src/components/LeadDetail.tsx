@@ -168,6 +168,7 @@ export function LeadDetail({
               <WhatsAppButton
                 leadId={leadId}
                 name={l.name}
+                business={l.page_name}
                 phone={contactPhone ?? (l.whatsapp_phone || l.phone)}
                 disabled={busy}
                 onError={setError}

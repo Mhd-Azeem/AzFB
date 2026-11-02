@@ -301,3 +301,115 @@ table .text-button {
     min-height: 44px;
   }
 }
+
+.mobile-lead-cards {
+  display: none;
+}
+.whatsapp-dialog {
+  max-width: 560px;
+  width: calc(100% - 28px);
+}
+.whatsapp-dialog textarea {
+  width: 100%;
+  margin-top: 8px;
+}
+.whatsapp-dialog .field-label {
+  display: grid;
+  gap: 8px;
+  margin: 16px 0;
+}
+.reminder-panel {
+  margin-bottom: 22px;
+  padding: 18px 22px;
+}
+.reminder-panel .panel-heading {
+  padding: 0;
+}
+.reminder-items {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0;
+}
+.reminder-items li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border-color, #263a55);
+}
+.followup-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 16px 0;
+}
+@media (max-width: 680px) {
+  .desktop-leads-table {
+    display: none;
+  }
+  .mobile-lead-cards {
+    display: grid;
+    gap: 12px;
+    padding: 12px;
+  }
+  .mobile-lead-card {
+    border: 1px solid var(--border-color, #304767);
+    background: var(--surface-panel, #101b2d);
+    border-radius: 12px;
+    padding: 16px;
+    min-width: 0;
+  }
+  .mobile-lead-heading {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 10px;
+  }
+  .mobile-lead-heading .lead-name {
+    min-width: 0;
+    white-space: normal;
+    text-align: left;
+    overflow-wrap: anywhere;
+  }
+  .mobile-lead-card dl {
+    margin: 16px 0;
+    font-size: 12px;
+  }
+  .mobile-lead-card dl div {
+    margin: 10px 0;
+  }
+  .mobile-lead-card dt {
+    color: var(--text-muted);
+    font-size: 11px;
+    margin-bottom: 4px;
+  }
+  .mobile-lead-card dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+    line-height: 1.6;
+  }
+  .mobile-lead-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .mobile-lead-actions .button {
+    padding: 10px;
+    min-height: 44px;
+    justify-content: center;
+    white-space: normal;
+  }
+  .reminder-panel {
+    padding: 16px;
+  }
+  .reminder-items li {
+    display: grid;
+    gap: 6px;
+  }
+  .whatsapp-dialog .contact-links .button {
+    width: 100%;
+    justify-content: center;
+    min-height: 44px;
+  }
+}

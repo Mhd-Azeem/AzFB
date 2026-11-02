@@ -1,3 +1,4 @@
+import { localDateInput, nextFollowup } from "../followups";
 import { useState } from "react";
 import { refresh, write } from "../api";
 import type { Identity } from "../../shared/contracts";
@@ -29,7 +30,7 @@ export function TaskForm({
         try {
           await write("/tasks", {
             title: f.get("title"),
-            dueAt: new Date(due + "Z").toISOString(),
+            dueAt: new Date(due).toISOString(),
             priority: f.get("priority"),
             assignedTo: f.get("assignedTo") || identity.userId,
             ...(leadId ? { leadId } : {}),
@@ -54,8 +55,20 @@ export function TaskForm({
         />
       </label>
       <label className="field-label">
-        Due date & time (UTC)
+        Due date & time (your local time)
         <input name="dueAt" type="datetime-local" required />
+        <button
+          type="button"
+          className="text-button"
+          onClick={(e) => {
+            const input = e.currentTarget.form?.elements.namedItem(
+              "dueAt",
+            ) as HTMLInputElement;
+            if (input) input.value = localDateInput(nextFollowup(1));
+          }}
+        >
+          Tomorrow at 9 AM
+        </button>
       </label>
       <div className="inline-fields">
         <label className="field-label">

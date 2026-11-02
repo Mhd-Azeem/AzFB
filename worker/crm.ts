@@ -150,7 +150,11 @@ crmRoutes.post("/leads/:id/whatsapp", async (c) => {
     lid = c.req.param("id");
   await ownedLead(c.env, a.workspaceId, lid);
   const b = await body(c);
-  keys(b, ["phone"]);
+  keys(b, ["phone", "message"]);
+  const message =
+    b.message === undefined
+      ? ""
+      : text(b.message, "WhatsApp draft", 2000, false);
   const number = whatsappNumber(text(b.phone, "phone", 80));
   if (!number)
     throw new ApiError(
@@ -180,7 +184,9 @@ crmRoutes.post("/leads/:id/whatsapp", async (c) => {
     ),
     audit(c.env, a, "lead.whatsapp_attempt", lid),
   ]);
-  return c.json({ ok: true, data: { url: `https://wa.me/${number}` } });
+  const url = new URL(`https://wa.me/${number}`);
+  if (message) url.searchParams.set("text", message);
+  return c.json({ ok: true, data: { url: url.toString() } });
 });
 crmRoutes.patch("/leads/:id", async (c) => {
   const a = c.get("auth"),
@@ -416,18 +422,62 @@ crmRoutes.get("/dashboard", async (c) =>
 crmRoutes.get("/analytics", async (c) =>
   c.json({ ok: true, data: await analytics(c) }),
 );
+function taskDayWindow(params: URLSearchParams) {
+  const utc = new Date().toISOString().slice(0, 10);
+  const from = params.get("todayFrom")
+    ? iso(params.get("todayFrom"))
+    : `${utc}T00:00:00.000Z`;
+  const to = params.get("todayTo")
+    ? iso(params.get("todayTo"))
+    : new Date(Date.parse(from) + 86400000).toISOString();
+  const span = Date.parse(to) - Date.parse(from);
+  if (span < 20 * 3600000 || span > 28 * 3600000)
+    throw new ApiError(400, "validation", "Invalid local day window.");
+  return { from, to };
+}
 crmRoutes.get("/tasks", async (c) => {
   const a = c.get("auth"),
     p = new URL(c.req.url).searchParams,
     pg = pagination(p),
     conditions = ["t.workspace_id=?"],
     args: unknown[] = [a.workspaceId];
-  if (p.get("state") === "open") conditions.push("t.completed_at IS NULL");
+
   if (p.get("assignedTo")) {
     conditions.push("t.assigned_to=?");
     args.push(p.get("assignedTo"));
   }
+  const scope = conditions.join(" AND "),
+    scopeArgs = [...args],
+    day = taskDayWindow(p),
+    timestamp = now();
+  const due = p.get("due");
+  if (due && !["overdue", "today", "upcoming"].includes(due))
+    throw new ApiError(400, "validation", "Invalid due filter.");
+  if (p.get("state") === "open" || due)
+    conditions.push("t.completed_at IS NULL");
+  if (due === "overdue") {
+    conditions.push("t.due_at<?");
+    args.push(timestamp);
+  }
+  if (due === "today") {
+    conditions.push("t.due_at>=? AND t.due_at<?");
+    args.push(day.from, day.to);
+  }
+  if (due === "upcoming") {
+    conditions.push("t.due_at>=? AND t.due_at>=?");
+    args.push(day.to, timestamp);
+  }
   const where = conditions.join(" AND ");
+  const summary = await one(
+    c.env,
+    `SELECT COUNT(*) AS open,SUM(t.due_at<?) AS overdue,SUM(t.due_at>=? AND t.due_at<?) AS today,SUM(t.due_at>=? AND t.due_at>=?) AS upcoming FROM tasks t WHERE ${scope} AND t.completed_at IS NULL`,
+    timestamp,
+    day.from,
+    day.to,
+    day.to,
+    timestamp,
+    ...scopeArgs,
+  );
   const [items, total] = await Promise.all([
     rows(
       c.env,
@@ -446,6 +496,7 @@ crmRoutes.get("/tasks", async (c) => {
     ok: true,
     data: {
       items,
+      summary,
       total: total?.total || 0,
       page: pg.page,
       pageSize: pg.pageSize,
@@ -703,7 +754,9 @@ crmRoutes.get("/notifications", async (c) => {
       a.workspaceId,
       a.userId,
     );
-  const [leads, tasks, count] = await Promise.all([
+  const day = taskDayWindow(new URL(c.req.url).searchParams),
+    timestamp = now();
+  const [leads, tasks, count, followups] = await Promise.all([
     rows(
       c.env,
       "SELECT id,name,created_at FROM leads WHERE workspace_id=? AND created_at>? ORDER BY created_at DESC LIMIT 20",
@@ -712,10 +765,10 @@ crmRoutes.get("/notifications", async (c) => {
     ),
     rows(
       c.env,
-      "SELECT id,title,due_at FROM tasks WHERE workspace_id=? AND assigned_to=? AND completed_at IS NULL AND due_at<=? ORDER BY due_at LIMIT 20",
+      "SELECT t.id,t.title,t.due_at,t.lead_id,l.name AS lead_name FROM tasks t LEFT JOIN leads l ON l.workspace_id=t.workspace_id AND l.id=t.lead_id WHERE t.workspace_id=? AND t.assigned_to=? AND t.completed_at IS NULL AND t.due_at<? ORDER BY t.due_at LIMIT 20",
       a.workspaceId,
       a.userId,
-      now(),
+      timestamp > day.to ? timestamp : day.to,
     ),
     one<{ total: number }>(
       c.env,
@@ -723,10 +776,25 @@ crmRoutes.get("/notifications", async (c) => {
       a.workspaceId,
       read?.seen_at || a.createdAt,
     ),
+    one(
+      c.env,
+      "SELECT COUNT(*) AS open,SUM(due_at<?) AS overdue,SUM(due_at>=? AND due_at<?) AS today FROM tasks WHERE workspace_id=? AND assigned_to=? AND completed_at IS NULL",
+      timestamp,
+      day.from,
+      day.to,
+      a.workspaceId,
+      a.userId,
+    ),
   ]);
   return c.json({
     ok: true,
-    data: { leads, tasks, newLeadCount: count?.total || 0, checkedAt: now() },
+    data: {
+      leads,
+      tasks,
+      followups,
+      newLeadCount: count?.total || 0,
+      checkedAt: now(),
+    },
   });
 });
 crmRoutes.post("/notifications/read", async (c) => {
