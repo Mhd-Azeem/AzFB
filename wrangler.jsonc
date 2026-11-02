@@ -1,0 +1,56 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "az-leads-local",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-10-30",
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"],
+  },
+  "vars": {
+    "ENVIRONMENT": "local",
+    "APP_ORIGIN": "http://localhost:8787",
+    "ALLOWED_ORIGINS": "http://localhost:8787,http://127.0.0.1:5173",
+    "META_GRAPH_VERSION": "",
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "az-leads-local",
+      "database_id": "local-only",
+      "migrations_dir": "migrations",
+    },
+  ],
+  "triggers": {
+    "crons": ["*/5 * * * *", "7 * * * *"],
+  },
+  "env": {
+    "production": {
+      "name": "az-leads",
+      "vars": {
+        "ENVIRONMENT": "production",
+        "APP_ORIGIN": "https://az-leads.azeem-maestro.workers.dev",
+        "ALLOWED_ORIGINS": "https://az-leads.azeem-maestro.workers.dev",
+        "META_GRAPH_VERSION": "v26.0",
+      },
+      // Fill database_id with the real value returned by `wrangler d1 create`.
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "az-leads",
+          "database_id": "f0feca0e-292c-40eb-95af-6ec3f3389ede",
+          "migrations_dir": "migrations",
+        },
+      ],
+      "triggers": {
+        "crons": ["*/5 * * * *", "7 * * * *"],
+      },
+      "queues": {
+        "producers": [{"binding":"INGEST_QUEUE","queue":"az-leads-ingestion"}],
+        "consumers": [{"queue":"az-leads-ingestion","max_batch_size":1,"max_batch_timeout":1,"max_retries":5,"retry_delay":60,"max_concurrency":1}]
+      },
+    },
+  },
+}

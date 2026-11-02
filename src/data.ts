@@ -104,7 +104,7 @@ export function filterLeads(
 }
 export function csv(leads: Lead[]) {
   const cell = (s: string) =>
-    `"${(/^[=+@\-\t\r]/.test(s) ? "'" : "") + s.replaceAll('"', '""')}"`;
+    `"${(/^[\s\uFEFF]*[=+@-]|^[\t\r\n]/.test(s) ? "'" : "") + s.replaceAll('"', '""')}"`;
   return [
     [
       "ID",

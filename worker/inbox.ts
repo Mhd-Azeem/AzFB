@@ -1,0 +1,97 @@
+import type { Env } from "./types";
+import { id, now, after } from "./types";
+import { rows, statement } from "./db";
+import { enqueueStatement, signalJobs } from "./jobs";
+export interface LeadEvent {
+  page_id: string;
+  form_id: string;
+  leadgen_id: string;
+  ad_id?: string;
+  created_time?: number;
+}
+export async function notifyInbox(env: Env, inboxId: string) {
+  try {
+    if (env.INGEST_QUEUE)
+      await env.INGEST_QUEUE.send({ inboxId }, { delaySeconds: 1 });
+    else await dispatchInbox(env, inboxId);
+  } catch {
+    /* D1-backed dispatch remains recoverable by Cron. */
+  }
+}
+export async function dispatchInbox(env: Env, inboxId: string) {
+  const lease = id();
+  const inbox = await statement(
+    env,
+    "UPDATE webhook_inbox SET status='running',lease_until=?,lease_token=?,updated_at=? WHERE id=? AND (status='pending' OR (status='running' AND lease_until<?)) RETURNING *",
+    after(120),
+    lease,
+    now(),
+    inboxId,
+    now(),
+  ).first<{
+    id: string;
+    events_json: string;
+    offset: number;
+    received_at: string;
+  }>();
+  if (!inbox) return;
+  const events = JSON.parse(inbox.events_json) as LeadEvent[],
+    batch = events.slice(inbox.offset, inbox.offset + 3),
+    jobs: string[] = [];
+  for (const v of batch) {
+    const matches = await rows<{ workspace_id: string; selected: number }>(
+      env,
+      "SELECT p.workspace_id,COALESCE(f.selected,0) AS selected FROM facebook_pages p LEFT JOIN instant_forms f ON f.workspace_id=p.workspace_id AND f.page_id=p.id AND f.id=? WHERE p.id=? AND p.authorized=1",
+      v.form_id,
+      v.page_id,
+    );
+    for (const match of matches) {
+      const job = enqueueStatement(
+        env,
+        match.workspace_id,
+        v.page_id,
+        v.form_id,
+        v.leadgen_id,
+        "lead",
+        `lead:${v.page_id}:${v.leadgen_id}`,
+      );
+      await env.DB.batch([
+        statement(
+          env,
+          "INSERT OR IGNORE INTO webhook_events(id,workspace_id,page_id,lead_id,form_id,payload_hash,payload_json,state,received_at) VALUES(?,?,?,?,?,?,?,?,?)",
+          id(),
+          match.workspace_id,
+          v.page_id,
+          v.leadgen_id,
+          v.form_id,
+          inbox.id,
+          JSON.stringify(v),
+          match.selected ? "received" : "unselected",
+          inbox.received_at,
+        ),
+        ...(match.selected ? [job.statement] : []),
+        statement(
+          env,
+          "UPDATE facebook_pages SET last_webhook_at=? WHERE workspace_id=? AND id=?",
+          inbox.received_at,
+          match.workspace_id,
+          v.page_id,
+        ),
+      ]);
+      if (match.selected) jobs.push(job.id);
+    }
+  }
+  const offset = inbox.offset + batch.length;
+  await statement(
+    env,
+    "UPDATE webhook_inbox SET offset=?,status=?,lease_until=NULL,lease_token=NULL,updated_at=? WHERE id=? AND lease_token=?",
+    offset,
+    offset >= events.length ? "complete" : "pending",
+    now(),
+    inbox.id,
+    lease,
+  ).run();
+  await signalJobs(env, jobs);
+  if (offset < events.length && env.INGEST_QUEUE)
+    await notifyInbox(env, inbox.id);
+}

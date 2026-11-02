@@ -1,0 +1,8 @@
+# Copy to .dev.vars for local Worker development only. Never commit the copy.
+SESSION_SECRET=
+TOKEN_ENCRYPTION_KEY=
+BOOTSTRAP_SECRET=
+META_APP_ID=
+META_LOGIN_CONFIG_ID=
+META_APP_SECRET=
+META_WEBHOOK_VERIFY_TOKEN=

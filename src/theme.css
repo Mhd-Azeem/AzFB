@@ -1,0 +1,36 @@
+:root {
+  --text-main: #eef4ff;
+  --text-muted: #b4c4db;
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --text-main: #14243c;
+  --text-muted: #40546f;
+  --link-text: #1859a7;
+  --success-text: #17644d;
+  --warning-text: #81500c;
+  --purple-text: #694099;
+  --surface-base: #f3f6fc;
+  --surface-panel: #ffffff;
+  --surface-raised: #e5edf8;
+  --border-color: #c7d4e5;
+  color: var(--text-main);
+  background: var(--surface-base);
+}
+:root[data-theme="light"] .button.primary {
+  color: #ffffff;
+  background: #2264c5;
+}
+:root[data-theme="light"] .sidebar nav button.active {
+  color: #174d91;
+  background: #dceafe;
+}
+:root[data-theme="light"] dialog::backdrop {
+  background: #14243c66;
+}
+.theme-picker {
+  margin-bottom: 24px;
+}
+.theme-picker select {
+  max-width: 260px;
+}

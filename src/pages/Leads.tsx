@@ -1,0 +1,474 @@
+import { WhatsAppButton } from "../components/WhatsAppButton";
+import { whatsappNumber } from "../../shared/whatsapp";
+import {
+  ArrowDownToLine,
+  ArrowUpRight,
+  ChevronLeft,
+  ChevronRight,
+  Search,
+} from "lucide-react";
+import { useState } from "react";
+import {
+  stages,
+  type FormRecord,
+  type LeadRecord,
+  type ListResult,
+} from "../../shared/contracts";
+import { useDebounce, useResource } from "../hooks/useResource";
+import { downloadExport } from "../api";
+import { Empty, ErrorState, Loading, dateTime } from "../components/States";
+export function Leads({
+  initialStatus = "",
+  initialForm = "",
+  onOpen,
+}: {
+  initialStatus?: string;
+  initialForm?: string;
+  onOpen: (id: string) => void;
+}) {
+  const [q, setQ] = useState(""),
+    [status, setStatus] = useState(initialStatus),
+    [accountId, setAccountId] = useState(""),
+    [form, setForm] = useState(initialForm),
+    [pageId, setPageId] = useState(""),
+    [assignedTo, setAssignedTo] = useState(""),
+    [from, setFrom] = useState(""),
+    [to, setTo] = useState(""),
+    [sort, setSort] = useState("newest"),
+    [page, setPage] = useState(1),
+    [exportError, setExportError] = useState(""),
+    [exporting, setExporting] = useState(false),
+    [contactError, setContactError] = useState("");
+  const query = useDebounce(q),
+    params = new URLSearchParams({
+      q: query,
+      status,
+      accountId,
+      form,
+      pageId,
+      assignedTo,
+      from,
+      to,
+      sort,
+      page: String(page),
+      pageSize: "25",
+    });
+  const accounts =
+    useResource<{ meta_user_id: string; label: string; status: string }[]>(
+      "/meta/accounts",
+    );
+  const r = useResource<ListResult<LeadRecord>>(`/leads?${params}`, 30000),
+    forms = useResource<FormRecord[]>("/forms"),
+    members =
+      useResource<{ id: string; name: string; disabled: number }[]>("/members");
+  const pages = Array.from(
+    new Map(
+      forms.data?.map((f) => [
+        f.page_id,
+        { id: f.page_id, name: f.page_name },
+      ]) || [],
+    ).values(),
+  );
+  function change(setter: (v: string) => void, value: string) {
+    setter(value);
+    setPage(1);
+  }
+  return (
+    <section className="panel leads-panel">
+      <div className="panel-heading">
+        <div>
+          <h2>
+            All leads{" "}
+            <span className="heading-count">{r.data?.total ?? "…"}</span>
+          </h2>
+          <p>
+            Updates automatically every 30 seconds while visible. Separate
+            submissions remain separate.
+          </p>
+        </div>
+        <button
+          className="button secondary"
+          disabled={exporting}
+          onClick={async () => {
+            setExporting(true);
+            setExportError("");
+            try {
+              await downloadExport(params.toString());
+            } catch (e) {
+              setExportError((e as Error).message);
+            } finally {
+              setExporting(false);
+            }
+          }}
+        >
+          <ArrowDownToLine size={15} />
+          {exporting ? "Exporting…" : "Export filtered leads"}
+        </button>
+      </div>
+      <div
+        className="account-tabs"
+        role="group"
+        aria-label="Leads by Facebook account"
+      >
+        <button
+          className={`button ${!accountId ? "primary" : "secondary"}`}
+          aria-pressed={!accountId}
+          onClick={() => change(setAccountId, "")}
+        >
+          All accounts
+        </button>
+        {accounts.data?.map((a) => (
+          <button
+            key={a.meta_user_id}
+            className={`button ${accountId === a.meta_user_id ? "primary" : "secondary"}`}
+            aria-pressed={accountId === a.meta_user_id}
+            onClick={() => {
+              change(setAccountId, a.meta_user_id);
+              setForm("");
+              setPageId("");
+            }}
+          >
+            {a.label || a.meta_user_id}
+            {a.status === "disconnected" ? " (disconnected)" : ""}
+          </button>
+        ))}
+      </div>
+      {accounts.error && (
+        <ErrorState error={accounts.error} retry={accounts.reload} />
+      )}
+      <div className="filters">
+        <label className="search">
+          <Search size={16} />
+          <input
+            aria-label="Search leads"
+            placeholder="Name, email, phone, campaign, form, Page…"
+            value={q}
+            onChange={(e) => change(setQ, e.target.value)}
+          />
+        </label>
+        <select
+          aria-label="Filter by status"
+          value={status}
+          onChange={(e) => change(setStatus, e.target.value)}
+        >
+          <option value="">All statuses</option>
+          {stages.map((s) => (
+            <option key={s}>{s}</option>
+          ))}
+        </select>
+        <select
+          aria-label="Filter by form"
+          value={form}
+          onChange={(e) => change(setForm, e.target.value)}
+        >
+          <option value="">All forms</option>
+          {forms.data?.map((f) => (
+            <option key={f.id} value={f.id}>
+              {f.name}
+            </option>
+          ))}
+        </select>
+        <select
+          aria-label="Filter by Page"
+          value={pageId}
+          onChange={(e) => change(setPageId, e.target.value)}
+        >
+          <option value="">All Pages</option>
+          {pages.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}
+            </option>
+          ))}
+        </select>
+        <select
+          aria-label="Filter by agent"
+          value={assignedTo}
+          onChange={(e) => change(setAssignedTo, e.target.value)}
+        >
+          <option value="">All agents</option>
+          {members.data?.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.name}
+            </option>
+          ))}
+        </select>
+        <label className="date-filter">
+          From
+          <input
+            type="date"
+            aria-label="From date"
+            value={from}
+            onChange={(e) => change(setFrom, e.target.value)}
+          />
+        </label>
+        <label className="date-filter">
+          To
+          <input
+            type="date"
+            aria-label="To date"
+            value={to}
+            onChange={(e) => change(setTo, e.target.value)}
+          />
+        </label>
+        <select
+          aria-label="Sort leads"
+          value={sort}
+          onChange={(e) => change(setSort, e.target.value)}
+        >
+          <option value="newest">Newest first</option>
+          <option value="oldest">Oldest first</option>
+          <option value="name">Name A–Z</option>
+        </select>
+        <button
+          className="text-button"
+          onClick={() => {
+            setAccountId("");
+            setQ("");
+            setStatus("");
+            setForm("");
+            setPageId("");
+            setAssignedTo("");
+            setFrom("");
+            setTo("");
+            setPage(1);
+          }}
+        >
+          Clear filters
+        </button>
+      </div>
+      {(forms.error || members.error) && (
+        <p className="form-error" role="alert">
+          Filter options could not load.{" "}
+          <button
+            className="text-button"
+            onClick={() => {
+              forms.reload();
+              members.reload();
+            }}
+          >
+            Retry options
+          </button>
+        </p>
+      )}
+      {contactError && (
+        <p role="alert" className="form-error">
+          {contactError}
+        </p>
+      )}
+      {exportError && (
+        <p role="alert" className="form-error">
+          {exportError}
+        </p>
+      )}
+      {r.error && r.data && (
+        <p className="form-error" role="alert">
+          Could not refresh leads. Showing the last loaded records.{" "}
+          <button className="text-button" onClick={r.reload}>
+            Retry
+          </button>
+        </p>
+      )}
+      {r.error && !r.data ? (
+        <ErrorState error={r.error} retry={r.reload} />
+      ) : !r.data && r.loading ? (
+        <Loading />
+      ) : !r.data?.items.length ? (
+        <Empty title="No leads found">
+          <p>
+            Try different filters, or connect a Page and sync selected forms.
+          </p>
+        </Empty>
+      ) : (
+        <>
+          <div className="mobile-lead-cards">
+            {r.data.items.map((l) => (
+              <article className="mobile-lead-card" key={l.id}>
+                <div className="mobile-lead-heading">
+                  <button className="lead-name" onClick={() => onOpen(l.id)}>
+                    <strong>{l.name}</strong>
+                  </button>
+                  <span className={`status ${l.status.toLowerCase()}`}>
+                    <span />
+                    {l.status}
+                  </span>
+                </div>
+                <dl>
+                  <div>
+                    <dt>WhatsApp</dt>
+                    <dd>{l.whatsapp_phone || l.phone || "Not supplied"}</dd>
+                  </div>
+                  {l.email && (
+                    <div>
+                      <dt>Email</dt>
+                      <dd>{l.email}</dd>
+                    </div>
+                  )}
+                  <div>
+                    <dt>Form / Page</dt>
+                    <dd>
+                      {l.form_name} / {l.page_name}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Submitted</dt>
+                    <dd>{dateTime(l.submitted_at)}</dd>
+                  </div>
+                  <div>
+                    <dt>Assigned</dt>
+                    <dd>
+                      {members.data?.find((m) => m.id === l.assigned_to)
+                        ?.name || "Unassigned"}
+                    </dd>
+                  </div>
+                </dl>
+                {l.next_followup_at && (
+                  <p
+                    className={
+                      l.next_followup_at < new Date().toISOString()
+                        ? "overdue"
+                        : "settings-hint"
+                    }
+                  >
+                    Follow-up: {dateTime(l.next_followup_at)}
+                  </p>
+                )}
+                <div className="mobile-lead-actions">
+                  <WhatsAppButton
+                    leadId={l.id}
+                    name={l.name}
+                    business={l.page_name}
+                    phone={l.whatsapp_phone || l.phone}
+                    compact
+                    onError={setContactError}
+                  />
+                  <button
+                    className="button secondary"
+                    onClick={() => onOpen(l.id)}
+                  >
+                    Details / follow-up
+                  </button>
+                </div>
+                {!whatsappNumber(l.whatsapp_phone || l.phone) && (
+                  <button className="text-button" onClick={() => onOpen(l.id)}>
+                    Add / fix WhatsApp number
+                  </button>
+                )}
+              </article>
+            ))}
+          </div>
+          <div className="table-scroll desktop-leads-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>LEAD</th>
+                  <th>FORM / PAGE</th>
+                  <th>STATUS</th>
+                  <th>SUBMITTED · UTC</th>
+                  <th>ASSIGNED</th>
+                  <th>WHATSAPP</th>
+                  <th>
+                    <span className="sr-only">Details</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {r.data.items.map((l, i) => (
+                  <tr key={l.id}>
+                    <td>
+                      <button
+                        className="lead-name"
+                        onClick={() => onOpen(l.id)}
+                      >
+                        <span className={`person person-${i % 4}`}>
+                          {l.name.slice(0, 2).toUpperCase()}
+                        </span>
+                        <span>
+                          <strong>{l.name}</strong>
+                          <small>
+                            {l.email ||
+                              l.whatsapp_phone ||
+                              l.phone ||
+                              "No contact supplied"}
+                          </small>
+                        </span>
+                      </button>
+                    </td>
+                    <td>
+                      {l.form_name}
+                      <small className="campaign">
+                        {l.page_name} · {l.campaign || l.source}
+                      </small>
+                    </td>
+                    <td>
+                      <span className={`status ${l.status.toLowerCase()}`}>
+                        <span />
+                        {l.status}
+                      </span>
+                    </td>
+                    <td>{dateTime(l.submitted_at)}</td>
+                    <td>
+                      {members.data?.find((m) => m.id === l.assigned_to)
+                        ?.name || "Unassigned"}
+                    </td>
+                    <td>
+                      <WhatsAppButton
+                        leadId={l.id}
+                        name={l.name}
+                        business={l.page_name}
+                        phone={l.whatsapp_phone || l.phone}
+                        compact
+                        onError={setContactError}
+                      />
+                      {!whatsappNumber(l.whatsapp_phone || l.phone) && (
+                        <button
+                          type="button"
+                          className="text-button"
+                          onClick={() => onOpen(l.id)}
+                        >
+                          Add / fix number
+                        </button>
+                      )}
+                    </td>
+                    <td>
+                      <button
+                        className="icon-button"
+                        aria-label={`View ${l.name}`}
+                        onClick={() => onOpen(l.id)}
+                      >
+                        <ArrowUpRight size={17} />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+      <div className="table-footer">
+        <span>{r.data?.total || 0} matching leads · Dates are UTC</span>
+        <div>
+          <button
+            className="icon-button"
+            aria-label="Previous page"
+            disabled={page === 1 || r.loading}
+            onClick={() => setPage((p) => p - 1)}
+          >
+            <ChevronLeft size={16} />
+          </button>
+          <span>
+            Page {page} of {Math.max(1, Math.ceil((r.data?.total || 0) / 25))}
+          </span>
+          <button
+            className="icon-button"
+            aria-label="Next page"
+            disabled={r.loading || page * 25 >= (r.data?.total || 0)}
+            onClick={() => setPage((p) => p + 1)}
+          >
+            <ChevronRight size={16} />
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}

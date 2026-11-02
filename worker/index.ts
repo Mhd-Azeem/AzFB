@@ -1,0 +1,184 @@
+import { scheduledSync, auditSubscriptions } from "./sync";
+import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
+import type { Bindings, Env } from "./types";
+import { ApiError, id } from "./types";
+import { authenticate, authRoutes, limit } from "./auth";
+import { crmRoutes } from "./crm";
+import { metaRoutes } from "./meta";
+import { webhooks } from "./webhooks";
+import { GraphError } from "./meta-client";
+import { maintenance, processJob } from "./jobs";
+import { dispatchInbox } from "./inbox";
+import { rows } from "./db";
+import { now } from "./types";
+const app = new Hono<Bindings>();
+app.use("*", async (c, next) => {
+  c.set("requestId", id());
+  c.header("X-Request-Id", c.get("requestId"));
+  c.header("X-Content-Type-Options", "nosniff");
+  c.header("Referrer-Policy", "no-referrer");
+  c.header("X-Frame-Options", "DENY");
+  c.header("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  c.header(
+    "Content-Security-Policy",
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+  );
+  if (c.env.ENVIRONMENT !== "local")
+    c.header(
+      "Strict-Transport-Security",
+      "max-age=31536000; includeSubDomains",
+    );
+  if (c.req.path.startsWith("/api/")) {
+    c.header("Cache-Control", "no-store");
+    const origin = c.req.header("Origin"),
+      allowed = (c.env.ALLOWED_ORIGINS || "").split(",").filter(Boolean);
+    if (origin && !allowed.includes(origin))
+      throw new ApiError(403, "origin_denied", "This origin is not allowed.");
+    if (origin) {
+      c.header("Access-Control-Allow-Origin", origin);
+      c.header("Access-Control-Allow-Credentials", "true");
+      c.header("Vary", "Origin");
+    }
+    if (c.req.method === "OPTIONS") {
+      c.header("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
+      c.header(
+        "Access-Control-Allow-Headers",
+        "Content-Type,X-CSRF-Token,X-Bootstrap-Secret",
+      );
+      return c.body(null, 204);
+    }
+    if (
+      !["GET", "HEAD"].includes(c.req.method) &&
+      !c.req.path.startsWith("/api/webhooks/") &&
+      !origin
+    )
+      throw new ApiError(
+        403,
+        "origin_required",
+        "An allowed Origin is required.",
+      );
+    if (
+      !c.req.path.startsWith("/api/webhooks/") &&
+      (!c.env.SESSION_SECRET || c.env.SESSION_SECRET.length < 32)
+    )
+      throw new ApiError(
+        503,
+        "server_not_configured",
+        "Configure server secrets and database before signing in.",
+      );
+    if (
+      c.env.ENVIRONMENT !== "local" &&
+      (!c.env.APP_ORIGIN?.startsWith("https://") ||
+        !allowed.includes(c.env.APP_ORIGIN))
+    )
+      throw new ApiError(
+        503,
+        "server_not_configured",
+        "Configure the HTTPS application origin.",
+      );
+  }
+  await next();
+});
+app.use(
+  "/api/*",
+  bodyLimit({
+    maxSize: 262144,
+    onError: (c) =>
+      c.json(
+        {
+          ok: false,
+          error: { code: "too_large", message: "Request is too large." },
+        },
+        413,
+      ),
+  }),
+);
+app.route("/api/webhooks/meta", webhooks);
+app.route("/api/auth", authRoutes);
+app.use("/api/*", authenticate);
+app.use("/api/*", async (c, next) => {
+  if (!["GET", "HEAD"].includes(c.req.method))
+    await limit(c, `write:${c.get("auth").userId}`, 120, 60);
+  await next();
+});
+app.route("/api/meta", metaRoutes);
+app.route("/api", crmRoutes);
+app.all("/api/*", (c) =>
+  c.json(
+    { ok: false, error: { code: "not_found", message: "Endpoint not found." } },
+    404,
+  ),
+);
+app.get("*", (c) => c.env.ASSETS.fetch(c.req.raw));
+app.onError((error, c) => {
+  if (error instanceof ApiError)
+    return c.json(
+      {
+        ok: false,
+        error: {
+          code: error.code,
+          message: error.message,
+          requestId: c.get("requestId"),
+        },
+      },
+      error.status as 400,
+    );
+  if (error instanceof GraphError)
+    return c.json(
+      {
+        ok: false,
+        error: {
+          code: `meta_${error.code}`,
+          message: error.message,
+          requestId: c.get("requestId"),
+        },
+      },
+      error.transient ? 503 : 403,
+    );
+  console.error(
+    JSON.stringify({ requestId: c.get("requestId"), event: "request_failed" }),
+  );
+  return c.json(
+    {
+      ok: false,
+      error: {
+        code: "internal_error",
+        message: "Request failed. Retry or contact the workspace owner.",
+        requestId: c.get("requestId"),
+      },
+    },
+    500,
+  );
+});
+export { app };
+export default {
+  fetch: app.fetch,
+  async scheduled(
+    _event: ScheduledController,
+    env: Env,
+    ctx: ExecutionContext,
+  ) {
+    ctx.waitUntil(
+      _event.cron === "7 * * * *"
+        ? auditSubscriptions(env)
+        : scheduledSync(env),
+    );
+  },
+  async queue(
+    batch: MessageBatch<{ jobId?: string; inboxId?: string }>,
+    env: Env,
+  ) {
+    for (const message of batch.messages) {
+      try {
+        if (typeof message.body?.inboxId === "string")
+          await dispatchInbox(env, message.body.inboxId);
+        else if (typeof message.body?.jobId === "string")
+          await processJob(env, message.body.jobId);
+        message.ack();
+      } catch {
+        message.retry({ delaySeconds: 60 });
+      }
+    }
+  },
+};

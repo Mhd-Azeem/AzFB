@@ -1,17 +1,40 @@
-# Frontend verification
+# Verification — full-stack implementation
 
-Verified locally on 1 November 2026 with Node 24 and npm 11 on Windows.
+This record supersedes the earlier fictional-frontend verification. An initial hosted deployment and remote migrations are now verified; see [deployment status](docs/DEPLOYMENT-STATUS.md). No live Meta account or genuine lead delivery is claimed.
 
-- Production build: TypeScript check and Vite build passed.
-- Unit tests: 4 passed (combined filters, campaign search/date bounds, CSV escaping/formula mitigation, and export scoping).
-- Desktop: dashboard rendered with all KPIs, activity chart, pipeline, and recent leads table.
-- Lead detail: custom questions/answers rendered; changing Amelia Carter to Converted and adding a note survived page reload. Escape dismissed the dialog and returned focus to its opener.
-- Leads: case-insensitive search plus status filter returned the expected lead; conflicting filters produced the empty state; pagination reached page 2.
-- Forms: Property enquiries opened a filtered list of 8 matching leads.
-- Analytics: form performance view rendered successfully.
-- Settings: connection remained unconfigured, the connect button was disabled, and demo reset restored initial data.
-- Mobile: checked at a 390 × 844 viewport; menu opened, selecting a view closed it, and final page width did not overflow. The leads table retains its own horizontal scroll area.
-- CSV: downloaded the 24-record demo export successfully in the browser.
-- Browser console: no application errors recorded during these checks.
+## Local automated checks
 
-No hosted deployment was created or verified. This frontend has no authentication, backend, or live Meta integration. GitHub Actions is configured to run the unit tests and build on pushes and pull requests; remote results are separate from these local checks.
+- Vitest: 53 tests passed at the final checkpoint, covering the four existing demo tests plus password/hash and authenticated encryption behavior, exact-byte signatures, validation/CSV guards, one-time provisioning, cookie/CSRF/origin behavior, expiry/rotation/logout/password revocation, login lockouts, workspace isolation, roles, OAuth state/permission checks, encrypted credential non-disclosure, Page subscription confirmation, webhook inbox/replay, distinct submission identity, custom answers, retry/permanent-failure behavior, history cursors, incremental reconciliation, leases, deletion suppression and foreign keys.
+- TypeScript: Worker check passed. Frontend production build passed after the clean lockfile install. The Wrangler non-deploying bundle check also passed; the dry-run itself did not upload. The later initial production deployment is recorded separately.
+- Wrangler local D1: all five versioned migrations applied successfully in the actual local runtime, in addition to SQLite fixture tests.
+- Local Worker API smoke: 18 checks passed, including authenticated live read APIs, actual D1 queries, CSV response, task creation/completion, CSRF rejection and session revocation. Only a generated local test account and explicitly labeled local verification task were created; no mock leads were seeded into live mode.
+- Dependency security audit after upgrading the inherited Vitest dependency reported zero advisories at installation time. Final npm ci succeeded and reported zero advisories.
+
+## Browser checks
+
+Local production assets were served by Wrangler, with an actual D1 session and generated local test credentials. Login succeeded. Dashboard rendered real zero totals and zero conversion instead of the 24 fictional records. Settings correctly displayed no Meta connection, disabled Connect/Sync while unconfigured, and showed D1/Cron delivery health. A follow-up was created and completed through the browser, then its completion was verified after reload. At 390 × 844, navigation and Settings worked with no page overflow (375px document width). The session-renewal race found during browser QA was corrected with a 30-second grace window and family-wide logout; regression tests pass.
+
+## Not externally verified
+
+- Authenticated production HTTPS sessions, Cloudflare runtime quotas/load, backup/restore and optional Queue transport. The initial hosted URL and remote migrations are now verified.
+- Meta app configuration, app review/advanced access/business eligibility, real OAuth grant, selected Page's actual lead access, live webhook delivery, genuine lead retrieval and multi-device use after deployment.
+- Some full Meta documentation pages were rate limited. Meta-owned SDK source confirmed the Lead schema and v26.0 availability; Meta-owned setup source confirmed app/Page leadgen subscriptions, lead retrieval endpoints and cursor/time-filter conventions. Final app-specific permissions and review requirements must still be checked in the owner's dashboard.
+
+Mocks prove handling of expected responses, not that your external accounts are configured or approved. See docs/DEPLOYMENT.md for the exact production setup and genuine-lead acceptance test.
+
+
+The Meta OAuth runtime compatibility correction, five additional regression tests, and native redirect probe are documented in [OAUTH-FIX.md](docs/OAUTH-FIX.md). Version 40616338-ba17-444f-a8de-6167b9787d48 deployed successfully; a fresh user authorization is still required to verify the live Meta round trip.
+
+Page-connection stage/permission diagnostics and their token-redaction regression test are described in [PAGE-CONNECTION-DIAGNOSTICS.md](docs/PAGE-CONNECTION-DIAGNOSTICS.md). The selected Page's actual external failure must be established from a fresh authenticated attempt; no successful Page subscription is claimed.
+
+- WhatsApp contact workflow: international-number validation, authenticated workspace ownership, New-to-Contacted persistence, later-stage preservation, and timestamped attempts verified with mocked records. Actual WhatsApp navigation/message delivery has not been tested with a real lead.
+
+- Multi-account upgrade and independent mock Meta OAuth sessions tested; actual second-account authorization and automatic delivery remain externally unverified. Migration 0006 preserves the existing credentials, Pages and CRM records.
+
+- Mobile cards, greeting draft composer and follow-up reminders: 44-test checkpoint, Worker type check and frontend production build passed. Added message encoding/length, local-day, notification isolation and persisted rescheduling checks. Actual browser/WhatsApp handoff remains manually verifiable.
+
+- Automatic-sync checkpoint: 53 tests passed, including blocked-Meta early acknowledgement, no-Queue ingestion, offline five-minute recovery, malformed answer isolation, subscription checks/repair, rate limits and dashboard polling. See docs/AUTOMATIC-SYNC-AUDIT.md for actual production evidence and external test limitations.
+
+- Live scheduler completion observed at 2026-11-02 14:10:20 UTC with lead count rising from 15 to 18. App-level webhook configuration was confirmed against Meta. Queue creation succeeded; final single-lead consumer refinement tested with 53 passing tests. Actual signed webhook delivery still requires a new Meta test lead.
+
+- Final production Queue verification: 14:20 UTC scheduler completed, history discovery complete, 11 individual lead jobs complete without saved errors, and 21 persisted leads versus 15 at audit start. Deployment 796f7989-27a6-4082-9dc4-2db06ceb5437. Real signed new-lead webhook receipt remains pending a Meta test submission.
