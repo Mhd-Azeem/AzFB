@@ -1,5 +1,7 @@
 import { ApiError } from "./types";
 import { stages } from "../shared/contracts";
+// Resolve custom WhatsApp answers for existing and future submissions without rewriting originals.
+export const whatsappPhoneColumn = `(SELECT json_extract(wa.values_json,'$[0]') FROM lead_answers wa WHERE wa.workspace_id=l.workspace_id AND wa.lead_id=l.id AND (replace(replace(lower(wa.field_key),'_',''),' ','') LIKE '%whatsapp%' OR replace(replace(lower(wa.question),'_',''),' ','') LIKE '%whatsapp%') AND json_valid(wa.values_json) AND length(json_extract(wa.values_json,'$[0]')) BETWEEN 8 AND 80 AND json_extract(wa.values_json,'$[0]') NOT GLOB '*[^0-9+ ().-]*' ORDER BY wa.field_key LIMIT 1)`;
 export function leadFilter(params: URLSearchParams, workspace: string) {
   const clauses = ["l.workspace_id=?"],
     args: unknown[] = [workspace];
@@ -8,7 +10,7 @@ export function leadFilter(params: URLSearchParams, workspace: string) {
     if (q.length > 200)
       throw new ApiError(400, "validation", "Search is too long.");
     clauses.push(
-      `(l.name LIKE ? ESCAPE '!' OR l.email LIKE ? ESCAPE '!' OR l.phone LIKE ? ESCAPE '!' OR l.campaign LIKE ? ESCAPE '!' OR f.name LIKE ? ESCAPE '!' OR p.name LIKE ? ESCAPE '!' OR l.lead_id LIKE ? ESCAPE '!')`,
+      `(l.name LIKE ? ESCAPE '!' OR l.email LIKE ? ESCAPE '!' OR l.phone LIKE ? ESCAPE '!' OR ${whatsappPhoneColumn} LIKE ? ESCAPE '!' OR l.campaign LIKE ? ESCAPE '!' OR f.name LIKE ? ESCAPE '!' OR p.name LIKE ? ESCAPE '!' OR l.lead_id LIKE ? ESCAPE '!')`,
     );
     const term = `%${q.replace(/[!%_]/g, "!$&")}%`;
     if (new TextEncoder().encode(term).length > 50)
@@ -17,7 +19,7 @@ export function leadFilter(params: URLSearchParams, workspace: string) {
         "validation",
         "Search is too long for the database. Use a shorter name, email fragment, phone or campaign.",
       );
-    args.push(...Array(7).fill(term));
+    args.push(...Array(8).fill(term));
   }
   for (const [key, col] of [
     ["status", "l.status"],
@@ -75,8 +77,7 @@ export function leadFilter(params: URLSearchParams, workspace: string) {
 }
 export const leadJoins =
   "FROM leads l LEFT JOIN instant_forms f ON f.workspace_id=l.workspace_id AND f.id=l.form_id LEFT JOIN facebook_pages p ON p.workspace_id=l.workspace_id AND p.id=l.page_id";
-export const leadColumns =
-  "l.id,l.workspace_id,l.lead_id,l.form_id,l.page_id,l.name,l.email,l.phone,l.campaign,l.ad_id,l.submitted_at,l.status,l.assigned_to,l.source,l.created_at,l.updated_at,COALESCE(f.name,l.form_id) AS form_name,COALESCE(p.name,l.page_id) AS page_name";
+export const leadColumns = `l.id,l.workspace_id,l.lead_id,l.form_id,l.page_id,l.name,l.email,l.phone,l.campaign,l.ad_id,l.submitted_at,l.status,l.assigned_to,l.source,l.created_at,l.updated_at,COALESCE(f.name,l.form_id) AS form_name,COALESCE(p.name,l.page_id) AS page_name,COALESCE(${whatsappPhoneColumn},'') AS whatsapp_phone`;
 export function pagination(params: URLSearchParams) {
   const page = Number(params.get("page") || 1),
     pageSize = Number(params.get("pageSize") || 25);

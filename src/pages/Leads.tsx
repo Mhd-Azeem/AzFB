@@ -256,7 +256,10 @@ export function Leads({
                       <span>
                         <strong>{l.name}</strong>
                         <small>
-                          {l.email || l.phone || "No contact supplied"}
+                          {l.email ||
+                            l.whatsapp_phone ||
+                            l.phone ||
+                            "No contact supplied"}
                         </small>
                       </span>
                     </button>
@@ -282,11 +285,11 @@ export function Leads({
                     <WhatsAppButton
                       leadId={l.id}
                       name={l.name}
-                      phone={l.phone}
+                      phone={l.whatsapp_phone || l.phone}
                       compact
                       onError={setContactError}
                     />
-                    {!whatsappNumber(l.phone) && (
+                    {!whatsappNumber(l.whatsapp_phone || l.phone) && (
                       <button
                         type="button"
                         className="text-button"

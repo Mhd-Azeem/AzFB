@@ -132,6 +132,10 @@ export function LeadDetail({
                 <dd>{l.phone || "Not supplied"}</dd>
               </div>
               <div>
+                <dt>WhatsApp number</dt>
+                <dd>{l.whatsapp_phone || l.phone || "Not supplied"}</dd>
+              </div>
+              <div>
                 <dt>Form / Page</dt>
                 <dd>
                   {l.form_name} / {l.page_name}
@@ -164,7 +168,7 @@ export function LeadDetail({
               <WhatsAppButton
                 leadId={leadId}
                 name={l.name}
-                phone={contactPhone ?? l.phone}
+                phone={contactPhone ?? (l.whatsapp_phone || l.phone)}
                 disabled={busy}
                 onError={setError}
               />
@@ -173,7 +177,7 @@ export function LeadDetail({
               WhatsApp number (include country code)
               <input
                 type="tel"
-                value={contactPhone ?? l.phone}
+                value={contactPhone ?? (l.whatsapp_phone || l.phone)}
                 onChange={(e) => setContactPhone(e.target.value)}
                 placeholder="+94771234567"
                 maxLength={80}

@@ -241,6 +241,60 @@ describe("authentication, authorization and workspace isolation", () => {
     ).data;
     expect(n.newLeadCount).toBe(0);
   });
+  it("resolves a custom WhatsApp answer in list, profile, search and CSV without changing the original", async () => {
+    await provision();
+    const session = await login();
+    const wid = (await one<{ id: string }>(env, "SELECT id FROM workspaces"))!
+      .id;
+    await seed(wid);
+    await saveLead(env, wid, "111", "222", {
+      ...fixture,
+      field_data: [
+        { name: "full_name", values: ["Custom contact"] },
+        { name: "whatsapp_number", values: ["+918074022480"] },
+      ],
+    });
+    const lead = (await one<{ id: string }>(
+      env,
+      "SELECT id FROM leads WHERE workspace_id=?",
+      wid,
+    ))!;
+    const list = (await (
+      await req("/leads?q=8074022480", "GET", undefined, session)
+    ).json()) as {
+      data: { items: { phone: string; whatsapp_phone: string }[] };
+    };
+    expect(list.data.items).toHaveLength(1);
+    expect(list.data.items[0].phone).toBe("");
+    expect(list.data.items[0].whatsapp_phone).toBe("+918074022480");
+    const detail = (await (
+      await req(`/leads/${lead.id}`, "GET", undefined, session)
+    ).json()) as {
+      data: {
+        lead: { whatsapp_phone: string };
+        answers: { values_json: string }[];
+      };
+    };
+    expect(detail.data.lead.whatsapp_phone).toBe("+918074022480");
+    expect(
+      detail.data.answers.some((a) => a.values_json.includes("+918074022480")),
+    ).toBe(true);
+    expect(
+      await (
+        await req("/leads/export?q=8074022480", "GET", undefined, session)
+      ).text(),
+    ).toContain("+918074022480");
+    // Old records already contain answers; display mapping must not depend on reimport.
+    await statement(
+      env,
+      "UPDATE lead_answers SET field_key='custom_42',question='WhatsApp number' WHERE lead_id=? AND field_key='whatsapp_number'",
+      lead.id,
+    ).run();
+    const remapped = (await (
+      await req("/leads", "GET", undefined, session)
+    ).json()) as { data: { items: { whatsapp_phone: string }[] } };
+    expect(remapped.data.items[0].whatsapp_phone).toBe("+918074022480");
+  });
   it("records WhatsApp attempts, validates numbers, preserves later stages and requires authentication", async () => {
     await provision();
     const session = await login();

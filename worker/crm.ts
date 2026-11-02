@@ -49,6 +49,7 @@ crmRoutes.get("/leads/export", async (c) => {
       "name",
       "email",
       "phone",
+      "whatsapp_phone",
       "campaign",
       "ad_id",
       "submitted_at",
