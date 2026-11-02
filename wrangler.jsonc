@@ -24,7 +24,7 @@
     },
   ],
   "triggers": {
-    "crons": ["*/10 * * * *"],
+    "crons": ["*/5 * * * *", "7 * * * *"],
   },
   "env": {
     "production": {
@@ -45,7 +45,7 @@
         },
       ],
       "triggers": {
-        "crons": ["*/10 * * * *"],
+        "crons": ["*/5 * * * *", "7 * * * *"],
       },
       // Optional queues configuration is documented in docs/DEPLOYMENT.md.
     },

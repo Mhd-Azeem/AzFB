@@ -1,3 +1,4 @@
+import { scheduledSync, auditSubscriptions } from "./sync";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import type { Bindings, Env } from "./types";
@@ -159,15 +160,9 @@ export default {
     ctx: ExecutionContext,
   ) {
     ctx.waitUntil(
-      (async () => {
-        const pending = await rows<{ id: string }>(
-          env,
-          "SELECT id FROM webhook_inbox WHERE status='pending' OR (status='running' AND lease_until<?) ORDER BY updated_at LIMIT 1",
-          now(),
-        );
-        for (const inbox of pending) await dispatchInbox(env, inbox.id);
-        await maintenance(env);
-      })(),
+      _event.cron === "7 * * * *"
+        ? auditSubscriptions(env)
+        : scheduledSync(env),
     );
   },
   async queue(

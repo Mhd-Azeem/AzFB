@@ -57,7 +57,7 @@ export function Leads({
     useResource<{ meta_user_id: string; label: string; status: string }[]>(
       "/meta/accounts",
     );
-  const r = useResource<ListResult<LeadRecord>>(`/leads?${params}`),
+  const r = useResource<ListResult<LeadRecord>>(`/leads?${params}`, 30000),
     forms = useResource<FormRecord[]>("/forms"),
     members =
       useResource<{ id: string; name: string; disabled: number }[]>("/members");
@@ -81,7 +81,10 @@ export function Leads({
             All leads{" "}
             <span className="heading-count">{r.data?.total ?? "…"}</span>
           </h2>
-          <p>Separate submissions remain separate, even for the same person.</p>
+          <p>
+            Updates automatically every 30 seconds while visible. Separate
+            submissions remain separate.
+          </p>
         </div>
         <button
           className="button secondary"
@@ -257,9 +260,17 @@ export function Leads({
           {exportError}
         </p>
       )}
-      {r.error ? (
+      {r.error && r.data && (
+        <p className="form-error" role="alert">
+          Could not refresh leads. Showing the last loaded records.{" "}
+          <button className="text-button" onClick={r.reload}>
+            Retry
+          </button>
+        </p>
+      )}
+      {r.error && !r.data ? (
         <ErrorState error={r.error} retry={r.reload} />
-      ) : r.loading ? (
+      ) : !r.data && r.loading ? (
         <Loading />
       ) : !r.data?.items.length ? (
         <Empty title="No leads found">

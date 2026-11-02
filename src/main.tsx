@@ -1,3 +1,4 @@
+import { SyncStatus } from "./components/SyncStatus";
 import React, { Suspense, lazy, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { Identity } from "../shared/contracts";
@@ -128,6 +129,7 @@ function App() {
           {reason}
         </p>
       )}
+      <SyncStatus onSettings={() => setView("Settings")} />
       <Notifications
         onLead={setSelected}
         onLeads={() => openLeads()}

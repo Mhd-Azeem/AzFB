@@ -60,12 +60,21 @@ export function enqueueStatement(
   };
 }
 export async function signalJobs(env: Env, ids: string[], delaySeconds = 0) {
-  if (!env.INGEST_QUEUE) return;
+  if (!env.INGEST_QUEUE) {
+    // Called through waitUntil after durable acknowledgement. Delayed work stays in D1.
+    if (!delaySeconds && ids.length) await processJob(env, ids[0]);
+    return;
+  }
+  let usedFallback = false;
   for (const jid of ids) {
     try {
       await env.INGEST_QUEUE.send({ jobId: jid }, { delaySeconds });
     } catch {
-      /* D1 is the durable source of truth. Cron will retry delivery/work. */
+      if (!delaySeconds && !usedFallback) {
+        usedFallback = true;
+        await processJob(env, jid);
+      }
+      /* Remaining D1 jobs are recovered by Cron. */
     }
   }
 }
@@ -75,7 +84,7 @@ export async function saveLead(
   page: string,
   form: string,
   data: MetaLead,
-  jobContext?: { id: string; lease: string },
+  jobContext?: { id: string; lease: string; questionsJson?: string },
 ) {
   if (
     !/^\d+$/.test(data.id) ||
@@ -84,13 +93,15 @@ export async function saveLead(
     (data.form_id && data.form_id !== form)
   )
     throw new GraphError("invalid_lead_response", false);
-  const selected = await one(
-    env,
-    "SELECT 1 FROM instant_forms WHERE workspace_id=? AND id=? AND page_id=? AND selected=1",
-    workspace,
-    form,
-    page,
-  );
+  const selected =
+    jobContext?.questionsJson !== undefined ||
+    (await one(
+      env,
+      "SELECT 1 FROM instant_forms WHERE workspace_id=? AND id=? AND page_id=? AND selected=1",
+      workspace,
+      form,
+      page,
+    ));
   if (!selected) return false;
   if (
     data.field_data.length > 100 ||
@@ -98,15 +109,23 @@ export async function saveLead(
       (v) =>
         !v ||
         typeof v.name !== "string" ||
-        v.name.length > 200 ||
-        !Array.isArray(v.values) ||
-        v.values.some((x) => typeof x !== "string"),
+        !v.name.trim() ||
+        v.name.length > 4096 ||
+        (v.values != null && !Array.isArray(v.values)),
     )
   )
     throw new GraphError("invalid_field_data", false);
   const fields = data.field_data.map((v) => ({
     name: v.name,
-    values: [...v.values],
+    values: (v.values || []).map((value: unknown) =>
+      typeof value === "string"
+        ? value
+        : value == null
+          ? ""
+          : typeof value === "object"
+            ? JSON.stringify(value)
+            : String(value),
+    ),
   }));
   if (data.custom_disclaimer_responses?.length)
     fields.push({
@@ -123,12 +142,15 @@ export async function saveLead(
     "Unnamed lead";
   const lid = await sha(`${workspace}:${page}:${data.id}`),
     t = now(),
-    questions = await one<{ questions_json: string }>(
-      env,
-      "SELECT questions_json FROM instant_forms WHERE workspace_id=? AND id=?",
-      workspace,
-      form,
-    );
+    questions =
+      jobContext?.questionsJson !== undefined
+        ? { questions_json: jobContext.questionsJson }
+        : await one<{ questions_json: string }>(
+            env,
+            "SELECT questions_json FROM instant_forms WHERE workspace_id=? AND id=?",
+            workspace,
+            form,
+          );
   let qs: { key: string; label?: string }[] = [];
   try {
     qs = JSON.parse(questions?.questions_json || "[]");
@@ -234,9 +256,9 @@ export async function processJob(env: Env, jobId: string) {
     if (!page?.authorized) throw new GraphError("page_not_authorized", false);
     if (page.token_expires_at && page.token_expires_at <= now())
       throw new GraphError("expired_token", false);
-    const form = await one(
+    const form = await one<{ questions_json: string }>(
       env,
-      "SELECT 1 FROM instant_forms WHERE workspace_id=? AND id=? AND page_id=? AND selected=1",
+      "SELECT questions_json FROM instant_forms WHERE workspace_id=? AND id=? AND page_id=? AND selected=1",
       job.workspace_id,
       job.form_id,
       job.page_id,
@@ -266,6 +288,7 @@ export async function processJob(env: Env, jobId: string) {
       await saveLead(env, job.workspace_id, job.page_id, job.form_id!, data, {
         id: job.id,
         lease,
+        questionsJson: form.questions_json,
       });
     } else {
       const result = await fetchLeads<GraphList<MetaLead>>(
@@ -274,7 +297,7 @@ export async function processJob(env: Env, jobId: string) {
         token,
         {
           fields: leadFields,
-          limit: "5",
+          limit: "10",
           ...(job.since_at
             ? {
                 filtering: JSON.stringify([
@@ -291,11 +314,47 @@ export async function processJob(env: Env, jobId: string) {
       );
       if (!Array.isArray(result.data))
         throw new GraphError("invalid_page", true);
-      for (const data of result.data)
-        await saveLead(env, job.workspace_id, job.page_id, job.form_id!, data, {
-          id: job.id,
-          lease,
-        });
+      for (const data of result.data) {
+        try {
+          await saveLead(
+            env,
+            job.workspace_id,
+            job.page_id,
+            job.form_id!,
+            data,
+            { id: job.id, lease, questionsJson: form.questions_json },
+          );
+        } catch (error) {
+          if (
+            !(error instanceof GraphError) ||
+            error.transient ||
+            !/^\d+$/.test(data?.id || "")
+          )
+            throw error;
+          // A malformed submission must not block every healthy submission on this form.
+          const failed = enqueueStatement(
+            env,
+            job.workspace_id,
+            job.page_id,
+            job.form_id!,
+            data.id,
+            "lead",
+            `lead:${job.page_id}:${data.id}`,
+          );
+          await env.DB.batch([
+            failed.statement,
+            statement(
+              env,
+              "UPDATE sync_jobs SET status='dead',error_code=?,last_error=?,updated_at=? WHERE workspace_id=? AND dedupe_key=? AND status NOT IN ('running','complete')",
+              error.code,
+              error.message,
+              now(),
+              job.workspace_id,
+              `lead:${job.page_id}:${data.id}`,
+            ),
+          ]);
+        }
+      }
       if (result.paging?.next) {
         next = result.paging.cursors?.after || null;
         if (!next || next === job.cursor)
@@ -378,9 +437,8 @@ export async function processJob(env: Env, jobId: string) {
             ),
           ]
         : []),
-      ...(["190", "10", "200", "invalid_token", "expired_token"].includes(
-        e.code,
-      )
+      ...(!e.transient &&
+      ["190", "10", "200", "invalid_token", "expired_token"].includes(e.code)
         ? [
             statement(
               env,
@@ -410,10 +468,10 @@ export async function processJob(env: Env, jobId: string) {
   }
 }
 export async function runDue(env: Env) {
-  const queueLimit = env.INGEST_QUEUE ? 10 : 1;
+  const queueLimit = env.INGEST_QUEUE ? 10 : 2;
   const jobs = await rows<{ id: string }>(
     env,
-    "SELECT id FROM sync_jobs WHERE (status='pending' AND next_run_at<=?) OR (status='running' AND lease_until<?) ORDER BY next_run_at LIMIT ?",
+    "SELECT id FROM sync_jobs WHERE (status='pending' AND next_run_at<=?) OR (status='running' AND lease_until<?) ORDER BY CASE kind WHEN 'lead' THEN 0 ELSE 1 END,next_run_at LIMIT ?",
     now(),
     now(),
     queueLimit,
@@ -425,7 +483,7 @@ export async function runDue(env: Env) {
     );
   else for (const job of jobs) await processJob(env, job.id);
 }
-export async function maintenance(env: Env) {
+export async function maintenance(env: Env, processJobs = true) {
   const t = now();
   await env.DB.batch([
     statement(
@@ -483,14 +541,19 @@ export async function maintenance(env: Env) {
     reconciled_at: string | null;
   }>(
     env,
-    `SELECT f.workspace_id,f.page_id,f.id,f.reconciled_at FROM instant_forms f JOIN facebook_pages p ON p.workspace_id=f.workspace_id AND p.id=f.page_id WHERE f.selected=1 AND p.authorized=1 AND (f.reconciled_at IS NULL OR f.reconciled_at<?) ORDER BY f.reconciled_at LIMIT 2`,
-    new Date(Date.now() - 6 * 3600000).toISOString(),
+    `SELECT f.workspace_id,f.page_id,f.id,f.reconciled_at FROM instant_forms f JOIN facebook_pages p ON p.workspace_id=f.workspace_id AND p.id=f.page_id WHERE f.selected=1 AND p.authorized=1 AND (f.reconciled_at IS NULL OR f.reconciled_at<?) ORDER BY f.reconciled_at LIMIT 4`,
+    new Date(Date.now() - 5 * 60000).toISOString(),
   );
   for (const f of forms) {
     const key = `history:${f.id}`,
-      existing = await one<{ id: string; status: string }>(
+      existing = await one<{
+        id: string;
+        status: string;
+        error_code: string | null;
+        updated_at: string;
+      }>(
         env,
-        "SELECT id,status FROM sync_jobs WHERE workspace_id=? AND dedupe_key=?",
+        "SELECT id,status,error_code,updated_at FROM sync_jobs WHERE workspace_id=? AND dedupe_key=?",
         f.workspace_id,
         key,
       );
@@ -519,11 +582,31 @@ export async function maintenance(env: Env) {
       ]);
     } else if (
       existing.status === "complete" ||
-      existing.status === "cancelled"
+      existing.status === "cancelled" ||
+      (existing.status === "dead" &&
+        existing.updated_at < new Date(Date.now() - 30 * 60000).toISOString() &&
+        [
+          "network",
+          "processing_error",
+          "invalid_response",
+          "invalid_page",
+          "1",
+          "2",
+          "4",
+          "17",
+          "32",
+          "341",
+          "613",
+          "429",
+          "500",
+          "502",
+          "503",
+          "504",
+        ].includes(existing.error_code || ""))
     )
       await statement(
         env,
-        "UPDATE sync_jobs SET status='pending',cursor=NULL,since_at=?,attempts=0,next_run_at=?,updated_at=? WHERE workspace_id=? AND dedupe_key=? AND status IN('complete','cancelled')",
+        "UPDATE sync_jobs SET status='pending',cursor=NULL,since_at=?,attempts=0,next_run_at=?,updated_at=? WHERE workspace_id=? AND dedupe_key=? AND status IN('complete','cancelled','dead')",
         since,
         t,
         t,
@@ -531,5 +614,5 @@ export async function maintenance(env: Env) {
         key,
       ).run();
   }
-  await runDue(env);
+  if (processJobs) await runDue(env);
 }

@@ -1,3 +1,4 @@
+import { scheduledSync, auditSubscriptions } from "./sync";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { testDatabase } from "./test-db";
 import { app } from "./index";
@@ -26,8 +27,14 @@ const origin = "http://localhost:8787",
   secret = "test-only-session-pepper-with-at-least-32-characters",
   bootstrap = "test-only-bootstrap-secret-at-least-32-characters";
 let db: ReturnType<typeof testDatabase>, env: Env;
+let background: Promise<unknown>[] = [];
+async function drainBackground() {
+  while (background.length) await Promise.all(background.splice(0));
+}
 const context = {
-  waitUntil: (_p: Promise<unknown>) => {},
+  waitUntil: (p: Promise<unknown>) => {
+    background.push(p.catch(() => undefined));
+  },
   passThroughOnException: () => {},
   props: {},
 } as unknown as ExecutionContext;
@@ -124,6 +131,13 @@ const fixture = {
   ],
 };
 beforeEach(() => {
+  background = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => {
+      throw new Error("Unexpected outbound request in test");
+    }),
+  );
   db = testDatabase();
   env = {
     DB: db.DB,
@@ -142,7 +156,8 @@ beforeEach(() => {
     META_WEBHOOK_VERIFY_TOKEN: "fixture-verify",
   };
 });
-afterEach(() => {
+afterEach(async () => {
+  await drainBackground();
   vi.unstubAllGlobals();
   db.close();
 });
@@ -983,7 +998,369 @@ describe("Meta webhook and ingestion pipeline", () => {
     expect(page.subscribed).toBe(0);
     expect(page.last_error).toContain("form discovery");
   });
+  it("acknowledges webhooks before Meta replies and imports without a Queue or browser refresh", async () => {
+    await provision();
+    const wid = (await one<{ id: string }>(env, "SELECT id FROM workspaces"))!
+      .id;
+    await seed(wid);
+    let release: (value: Response) => void = () => {};
+    const fetched = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          release = resolve;
+        }),
+    );
+    vi.stubGlobal("fetch", fetched);
+    const payload = {
+      object: "page",
+      entry: [
+        {
+          id: "111",
+          changes: [
+            {
+              field: "leadgen",
+              value: { page_id: "111", form_id: "222", leadgen_id: "333" },
+            },
+          ],
+        },
+      ],
+    };
+    const signature =
+      "sha256=" + (await hmac(env.META_APP_SECRET!, JSON.stringify(payload)));
+    const response = await req("/webhooks/meta", "POST", payload, undefined, {
+      "X-Hub-Signature-256": signature,
+    });
+    expect(response.status).toBe(200);
+    expect(await rows(env, "SELECT id FROM webhook_inbox")).toHaveLength(1);
+    for (
+      let attempt = 0;
+      attempt < 100 && !fetched.mock.calls.length;
+      attempt++
+    )
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    expect(fetched).toHaveBeenCalledTimes(1);
+    expect(await rows(env, "SELECT id FROM leads")).toHaveLength(0);
+    release(new Response(JSON.stringify(fixture)));
+    await drainBackground();
+    expect(await rows(env, "SELECT id FROM leads")).toHaveLength(1);
+    expect(
+      (await one<{ state: string }>(env, "SELECT state FROM webhook_events"))!
+        .state,
+    ).toBe("processed");
+    expect(
+      (
+        await req("/webhooks/meta", "POST", payload, undefined, {
+          "X-Hub-Signature-256": signature,
+        })
+      ).status,
+    ).toBe(200);
+    await drainBackground();
+    expect(await rows(env, "SELECT id FROM leads")).toHaveLength(1);
+    expect(fetched).toHaveBeenCalledTimes(1);
+  });
+  it("recovers missing leads every five minutes offline and keeps manual sync idempotent", async () => {
+    await provision();
+    const session = await login();
+    const wid = (await one<{ id: string }>(env, "SELECT id FROM workspaces"))!
+      .id;
+    await seed(wid);
+    await saveLead(env, wid, "111", "222", fixture);
+    await statement(
+      env,
+      "UPDATE leads SET status='Interested' WHERE workspace_id=?",
+      wid,
+    ).run();
+    const lead = (await one<{ id: string }>(env, "SELECT id FROM leads"))!;
+    await req(
+      `/leads/${lead.id}/notes`,
+      "POST",
+      { body: "Preserve this sales note" },
+      session,
+    );
+    await statement(
+      env,
+      "UPDATE instant_forms SET reconciled_at=? WHERE workspace_id=?",
+      new Date(Date.now() - 6 * 60000).toISOString(),
+      wid,
+    ).run();
+    const payload = [
+      fixture,
+      ...Array.from({ length: 9 }, (_, i) => ({
+        ...fixture,
+        id: String(700 + i),
+        field_data: [
+          {
+            name: "a".repeat(256),
+            values: [25, true, null, { answer: "custom" }],
+          },
+        ],
+      })),
+    ];
+    const fetch = vi.fn(
+      async () => new Response(JSON.stringify({ data: payload })),
+    );
+    vi.stubGlobal("fetch", fetch);
+    await scheduledSync(env);
+    expect(await rows(env, "SELECT id FROM leads")).toHaveLength(10);
+    expect(
+      (await one<{ status: string }>(
+        env,
+        "SELECT status FROM leads WHERE id=?",
+        lead.id,
+      ))!.status,
+    ).toBe("Interested");
+    expect(await rows(env, "SELECT id FROM lead_notes")).toHaveLength(1);
+    expect(
+      (await one<{ last_scheduler_completed_at: string }>(
+        env,
+        "SELECT last_scheduler_completed_at FROM sync_health",
+      ))!.last_scheduler_completed_at,
+    ).toBeTruthy();
+    await scheduledSync(env);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await statement(
+      env,
+      "UPDATE instant_forms SET reconciled_at=? WHERE workspace_id=?",
+      new Date(Date.now() - 6 * 60000).toISOString(),
+      wid,
+    ).run();
+    await scheduledSync(env);
+    expect(await rows(env, "SELECT id FROM leads")).toHaveLength(10);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(
+      (await req("/meta/sync", "POST", { formIds: ["222"] }, session)).status,
+    ).toBe(202);
+    await drainBackground();
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(await rows(env, "SELECT id FROM leads")).toHaveLength(10);
+    const sync = await (
+      await req("/sync-status", "GET", undefined, session)
+    ).text();
+    expect(sync).not.toContain("fixture-page-token");
+    expect(sync).not.toContain("Preserve this sales note");
+  });
+  it("honors Meta rate limits and recovers exhausted temporary history failures without reviving permission failures", async () => {
+    await provision();
+    const wid = (await one<{ id: string }>(env, "SELECT id FROM workspaces"))!
+      .id;
+    await seed(wid);
+    const job = enqueueStatement(
+      env,
+      wid,
+      "111",
+      "222",
+      "333",
+      "lead",
+      "lead:111:333",
+    );
+    await job.statement.run();
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({ error: { code: 4, is_transient: true } }),
+            { status: 429, headers: { "Retry-After": "120" } },
+          ),
+        )
+        .mockResolvedValueOnce(new Response(JSON.stringify(fixture))),
+    );
+    await processJob(env, job.id);
+    const retry = (await one<{ status: string; next_run_at: string }>(
+      env,
+      "SELECT status,next_run_at FROM sync_jobs WHERE id=?",
+      job.id,
+    ))!;
+    expect(retry.status).toBe("pending");
+    expect(Date.parse(retry.next_run_at)).toBeGreaterThanOrEqual(
+      Date.now() + 119000,
+    );
+    await statement(
+      env,
+      "UPDATE sync_jobs SET next_run_at=? WHERE id=?",
+      new Date(0).toISOString(),
+      job.id,
+    ).run();
+    await processJob(env, job.id);
+    expect(await rows(env, "SELECT id FROM leads")).toHaveLength(1);
+    const history = enqueueStatement(
+      env,
+      wid,
+      "111",
+      "222",
+      null,
+      "history",
+      "history:222",
+    );
+    await history.statement.run();
+    await statement(
+      env,
+      "UPDATE sync_jobs SET status='dead',error_code='network',updated_at=? WHERE id=?",
+      new Date(Date.now() - 31 * 60000).toISOString(),
+      history.id,
+    ).run();
+    await maintenance(env, false);
+    expect(
+      (await one<{ status: string }>(
+        env,
+        "SELECT status FROM sync_jobs WHERE id=?",
+        history.id,
+      ))!.status,
+    ).toBe("pending");
+    await statement(
+      env,
+      "UPDATE sync_jobs SET status='dead',error_code='200',updated_at=? WHERE id=?",
+      new Date(0).toISOString(),
+      history.id,
+    ).run();
+    await maintenance(env, false);
+    expect(
+      (await one<{ status: string }>(
+        env,
+        "SELECT status FROM sync_jobs WHERE id=?",
+        history.id,
+      ))!.status,
+    ).toBe("dead");
+  });
+  it("isolates malformed submissions and continues history pagination", async () => {
+    await provision();
+    const wid = (await one<{ id: string }>(env, "SELECT id FROM workspaces"))!
+      .id;
+    await seed(wid);
+    const job = enqueueStatement(
+      env,
+      wid,
+      "111",
+      "222",
+      null,
+      "history",
+      "history:222",
+    );
+    await job.statement.run();
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            data: [
+              {
+                ...fixture,
+                id: "801",
+                field_data: [{ name: "", values: ["bad"] }],
+              },
+              { ...fixture, id: "802" },
+            ],
+            paging: { next: "not-followed", cursors: { after: "cursor-2" } },
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ data: [{ ...fixture, id: "803" }] })),
+      );
+    vi.stubGlobal("fetch", fetch);
+    await processJob(env, job.id);
+    expect(await rows(env, "SELECT id FROM leads")).toHaveLength(1);
+    expect(
+      (await one<{ status: string }>(
+        env,
+        "SELECT status FROM sync_jobs WHERE kind='lead'",
+      ))!.status,
+    ).toBe("dead");
+    await statement(
+      env,
+      "UPDATE sync_jobs SET next_run_at=? WHERE id=?",
+      new Date(0).toISOString(),
+      job.id,
+    ).run();
+    await processJob(env, job.id);
+    expect(await rows(env, "SELECT id FROM leads")).toHaveLength(2);
+    expect(
+      (await one<{ status: string }>(
+        env,
+        "SELECT status FROM sync_jobs WHERE id=?",
+        job.id,
+      ))!.status,
+    ).toBe("complete");
+    expect(
+      new URL(String(fetch.mock.calls[1][0])).searchParams.get("after"),
+    ).toBe("cursor-2");
+  });
+  it("verifies app/Page webhook configuration and repairs missing Page leadgen subscriptions", async () => {
+    await provision();
+    const session = await login();
+    const wid = (await one<{ id: string }>(env, "SELECT id FROM workspaces"))!
+      .id;
+    await seed(wid);
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            data: [
+              {
+                object: "page",
+                callback_url: origin + "/api/webhooks/meta",
+                active: true,
+                fields: [{ name: "leadgen" }],
+              },
+            ],
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: [] })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ success: true })))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            data: [{ id: "12345", subscribed_fields: ["leadgen"] }],
+          }),
+        ),
+      );
+    vi.stubGlobal("fetch", fetch);
+    await auditSubscriptions(env, wid);
+    expect(fetch).toHaveBeenCalledTimes(4);
+    expect(
+      (await one<{ app_subscription_ok: number }>(
+        env,
+        "SELECT app_subscription_ok FROM sync_health",
+      ))!.app_subscription_ok,
+    ).toBe(1);
+    expect(
+      (await one<{ subscribed: number }>(
+        env,
+        "SELECT subscribed FROM facebook_pages",
+      ))!.subscribed,
+    ).toBe(1);
+    expect(fetch.mock.calls[2][1].method).toBe("POST");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async (input) =>
+          new Response(
+            JSON.stringify(
+              String(input).includes("/subscriptions")
+                ? {
+                    data: [
+                      { object: "user", callback_url: "https://wrong.example" },
+                    ],
+                  }
+                : { data: [{ id: "12345", subscribed_fields: ["leadgen"] }] },
+            ),
+          ),
+      ),
+    );
+    await auditSubscriptions(env, wid);
+    const safe = await (
+      await req("/meta/connection-status", "GET", undefined, session)
+    ).text();
+    expect(safe).toContain("Meta app Page/leadgen webhook is missing");
+    expect(safe).not.toContain("fixture-page-token");
+  });
   it("dispatches a large signed batch in bounded slices and reclaims an expired inbox lease", async () => {
+    env.INGEST_QUEUE = {
+      send: vi.fn(async () => {}),
+    } as unknown as NonNullable<Env["INGEST_QUEUE"]>;
     await provision();
     const wid = (await one<{ id: string }>(env, "SELECT id FROM workspaces"))!
       .id;
@@ -1598,6 +1975,9 @@ describe("Meta webhook and ingestion pipeline", () => {
     expect(mock).toHaveBeenCalledTimes(1);
   });
   it("verifies challenge, rejects bad signatures and durably deduplicates replay", async () => {
+    env.INGEST_QUEUE = {
+      send: vi.fn(async () => {}),
+    } as unknown as NonNullable<Env["INGEST_QUEUE"]>;
     await provision();
     const wid = (await one<{ id: string }>(env, "SELECT id FROM workspaces"))!
       .id;

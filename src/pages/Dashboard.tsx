@@ -11,7 +11,7 @@ export function Dashboard({
 }) {
   const r = useResource<Analytics>(
     "/" + (analytics ? "analytics" : "dashboard"),
-    300000,
+    30000,
   );
   if (!r.data)
     return r.error ? (

@@ -1,3 +1,4 @@
+import { auditSubscriptions } from "./sync";
 import { Hono } from "hono";
 import type { Bindings, Env } from "./types";
 import { ApiError, after, id, now } from "./types";
@@ -537,6 +538,17 @@ metaRoutes.post("/jobs/:id/replay", async (c) => {
   c.executionCtx.waitUntil(signalJobs(c.env, [jid]));
   return c.json({ ok: true, data: { id: jid } }, 202);
 });
+metaRoutes.post("/verify-webhooks", async (c) => {
+  requireAdmin(c);
+  await auditSubscriptions(c.env, c.get("auth").workspaceId);
+  return c.json({
+    ok: true,
+    data: {
+      message:
+        "Webhook configuration checked. Review app and Page diagnostics below; configuration alone does not prove lead delivery.",
+    },
+  });
+});
 metaRoutes.get("/connection-status", async (c) => {
   const a = c.get("auth"),
     connection = await one(
@@ -546,7 +558,7 @@ metaRoutes.get("/connection-status", async (c) => {
     ),
     pages = await rows(
       c.env,
-      "SELECT p.id,p.name,p.authorized,p.subscribed,p.last_sync_at,p.last_webhook_at,p.last_error,p.token_expires_at,m.meta_user_id AS account_id FROM facebook_pages p LEFT JOIN meta_account_pages m ON m.workspace_id=p.workspace_id AND m.page_id=p.id WHERE p.workspace_id=?",
+      "SELECT p.id,p.name,p.authorized,p.subscribed,p.last_sync_at,p.last_webhook_at,p.last_error,p.token_expires_at,p.subscription_checked_at,p.subscription_error,m.meta_user_id AS account_id FROM facebook_pages p LEFT JOIN meta_account_pages m ON m.workspace_id=p.workspace_id AND m.page_id=p.id WHERE p.workspace_id=?",
       a.workspaceId,
     ),
     health = await one(
@@ -566,6 +578,21 @@ metaRoutes.get("/connection-status", async (c) => {
         ? `${c.env.APP_ORIGIN}/api/webhooks/meta`
         : null,
       requiredScopes: scopes,
+      schedule: {
+        reconciliationMinutes: 5,
+        uiRefreshSeconds: 30,
+        subscriptionCheck: "hourly",
+      },
+      syncHealth: await one(
+        c.env,
+        "SELECT last_scheduler_at,last_scheduler_completed_at,last_scheduler_error,app_checked_at,app_subscription_ok,app_error FROM sync_health WHERE workspace_id=?",
+        a.workspaceId,
+      ),
+      inboxHealth: await one(
+        c.env,
+        "SELECT COUNT(*) AS pending,MIN(received_at) AS oldest FROM webhook_events WHERE workspace_id=? AND state='received'",
+        a.workspaceId,
+      ),
       connection:
         connection &&
         typeof connection.token_expires_at === "string" &&

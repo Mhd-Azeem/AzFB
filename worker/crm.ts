@@ -416,6 +416,30 @@ async function analytics(c: Parameters<typeof requireAdmin>[0]) {
     to: p.get("to"),
   };
 }
+crmRoutes.get("/sync-status", async (c) => {
+  const a = c.get("auth");
+  const [pages, health, jobs] = await Promise.all([
+    one(
+      c.env,
+      "SELECT COUNT(*) AS connected,MAX(last_sync_at) AS last_sync_at,MAX(last_webhook_at) AS last_webhook_at FROM facebook_pages WHERE workspace_id=? AND authorized=1",
+      a.workspaceId,
+    ),
+    one(
+      c.env,
+      "SELECT last_scheduler_completed_at,last_scheduler_error,app_error FROM sync_health WHERE workspace_id=?",
+      a.workspaceId,
+    ),
+    one(
+      c.env,
+      "SELECT SUM(status='pending' OR status='running') AS pending,SUM(status='dead') AS failed FROM sync_jobs WHERE workspace_id=? AND status IN ('pending','running','dead')",
+      a.workspaceId,
+    ),
+  ]);
+  return c.json({
+    ok: true,
+    data: { ...pages, ...health, ...jobs, checkedAt: now() },
+  });
+});
 crmRoutes.get("/dashboard", async (c) =>
   c.json({ ok: true, data: await analytics(c) }),
 );

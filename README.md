@@ -60,3 +60,5 @@ Open `http://localhost:8787`. Provision the Owner once using `/api/auth/bootstra
 No app IDs, database UUIDs, production origins or secrets are fabricated. The production database binding and origin now use values verified during setup. D1+Cron mode needs no Queue binding but is intentionally low-throughput; Queues is recommended for timely delivery and history imports. Availability windows, App Review and free-tier quotas are provider constraints, not promises made by this application.
 
 Multi-account Facebook login setup, migration behavior, account lead tabs and mobile navigation: [docs/MULTI-ACCOUNT.md](docs/MULTI-ACCOUNT.md).
+
+Automatic lead synchronization audit and recovery details: [docs/AUTOMATIC-SYNC-AUDIT.md](docs/AUTOMATIC-SYNC-AUDIT.md).

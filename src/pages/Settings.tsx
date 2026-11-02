@@ -13,6 +13,8 @@ interface Page {
   last_sync_at: string | null;
   last_webhook_at: string | null;
   last_error: string | null;
+  subscription_checked_at: string | null;
+  subscription_error: string | null;
 }
 interface FacebookAccount {
   meta_user_id: string;
@@ -24,6 +26,14 @@ interface FacebookAccount {
 }
 interface Connection {
   accounts: FacebookAccount[];
+  syncHealth: {
+    last_scheduler_at: string | null;
+    last_scheduler_completed_at: string | null;
+    last_scheduler_error: string | null;
+    app_checked_at: string | null;
+    app_subscription_ok: number | null;
+    app_error: string | null;
+  } | null;
   configured: boolean;
   webhookConfigured: boolean;
   callbackUri: string | null;
@@ -66,12 +76,12 @@ export function Settings({
   identity: Identity;
   onSignedOut: () => void;
 }) {
-  const r = useResource<Connection>("/meta/connection-status", 300000),
+  const r = useResource<Connection>("/meta/connection-status", 30000),
     forms = useResource<FormRecord[]>("/forms"),
     members = useResource<Member[]>("/members"),
     jobs = useResource<Job[]>(
       identity.role === "Agent" ? null : "/meta/jobs",
-      300000,
+      30000,
     ),
     workspace = useResource<{ name: string; retention_days: number }>(
       "/workspace",
@@ -332,6 +342,15 @@ export function Settings({
                   Last signed webhook:{" "}
                   {p.last_webhook_at ? dateTime(p.last_webhook_at) : "Never"}
                 </small>
+                {p.subscription_error && (
+                  <p className="form-error">{p.subscription_error}</p>
+                )}
+                <small className="settings-hint">
+                  Subscription checked:{" "}
+                  {p.subscription_checked_at
+                    ? dateTime(p.subscription_checked_at)
+                    : "Not checked yet"}
+                </small>
                 {p.last_error && <p className="form-error">{p.last_error}</p>}
                 {admin && (
                   <div className="contact-links">
@@ -367,10 +386,45 @@ export function Settings({
         <section className="panel settings-card full-width">
           <h2>Sync & ingestion health</h2>
           <p>
+            Last completed background run:{" "}
+            {d.syncHealth?.last_scheduler_completed_at
+              ? dateTime(d.syncHealth.last_scheduler_completed_at)
+              : "Not recorded yet"}
+            . This runs even with the website closed.
+          </p>
+          {d.syncHealth?.last_scheduler_error && (
+            <p className="form-error">{d.syncHealth.last_scheduler_error}</p>
+          )}
+          <p>
+            App webhook check:{" "}
+            {d.syncHealth?.app_checked_at
+              ? `${d.syncHealth.app_subscription_ok ? "Configuration confirmed" : "Needs attention"} - ${dateTime(d.syncHealth.app_checked_at)}`
+              : "Not checked yet"}
+          </p>
+          {d.syncHealth?.app_error && (
+            <p className="form-error">{d.syncHealth.app_error}</p>
+          )}
+          {admin && (
+            <button
+              className="button secondary"
+              disabled={busy}
+              onClick={() =>
+                act(
+                  () => write("/meta/verify-webhooks", {}),
+                  "Webhook configuration checked. Review the diagnostics; send a Meta test lead to verify delivery.",
+                )
+              }
+            >
+              Verify webhook configuration
+            </button>
+          )}
+
+          <p>
             {d.health.pending || 0} pending · {d.health.running || 0} processing
             · {d.health.failed || 0} failed. Without Queues, processing runs
-            every 10 minutes. Selected forms reconcile approximately every 6
-            hours. Only currently available leads can be imported.
+            every 5 minutes. Selected forms reconcile every 5 minutes in bounded
+            batches. Larger backlogs may take additional runs. Only currently
+            available leads can be imported.
           </p>
           {admin && (
             <div className="contact-links">

@@ -39,9 +39,15 @@ export class GraphError extends Error {
   ) {
     super(
       message ||
-        (transient
-          ? "Meta is temporarily unavailable or rate limited. Please try again."
-          : "Meta access failed. Check Page lead access and reconnect Facebook."),
+        (code === "invalid_field_data"
+          ? "A Meta form answer has an unsupported structure. Review this submission; other leads continue importing."
+          : code === "invalid_lead_response"
+            ? "Meta returned an invalid lead identity or submission timestamp. Review and replay this job."
+            : code === "lead_answers_too_large"
+              ? "This submission exceeds the supported answer size. Review this individual lead."
+              : transient
+                ? "Meta is temporarily unavailable or rate limited. Please try again."
+                : "Meta access failed. Check Page lead access and reconnect Facebook."),
     );
   }
 }
@@ -271,7 +277,7 @@ export interface MetaLead {
   is_organic?: boolean;
   platform?: string;
   custom_disclaimer_responses?: unknown[];
-  field_data: { name: string; values: string[] }[];
+  field_data: { name: string; values: unknown[] | null }[];
 }
 export const baseLeadFields = "id,created_time,form_id,ad_id,field_data";
 export const leadFields =

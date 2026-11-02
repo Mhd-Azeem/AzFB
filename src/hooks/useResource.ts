@@ -1,3 +1,4 @@
+import { subscribeAutoRefresh } from "../polling";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 export function useResource<T>(path: string | null, pollMs = 0) {
@@ -18,7 +19,9 @@ export function useResource<T>(path: string | null, pollMs = 0) {
     setLoading(true);
     setError("");
     api<T>(path, { signal: controller.signal })
-      .then(setData)
+      .then((result) => {
+        if (!controller.signal.aborted) setData(result);
+      })
       .catch((e) => {
         if (e.name !== "AbortError") setError(e.message);
       })
@@ -33,10 +36,7 @@ export function useResource<T>(path: string | null, pollMs = 0) {
   }, [reload]);
   useEffect(() => {
     if (!pollMs) return;
-    const timer = setInterval(() => {
-      if (document.visibilityState === "visible") reload();
-    }, pollMs);
-    return () => clearInterval(timer);
+    return subscribeAutoRefresh(reload, pollMs);
   }, [pollMs, reload]);
   return { data, loading, error, reload };
 }

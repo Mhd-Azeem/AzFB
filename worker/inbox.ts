@@ -11,7 +11,9 @@ export interface LeadEvent {
 }
 export async function notifyInbox(env: Env, inboxId: string) {
   try {
-    await env.INGEST_QUEUE?.send({ inboxId }, { delaySeconds: 1 });
+    if (env.INGEST_QUEUE)
+      await env.INGEST_QUEUE.send({ inboxId }, { delaySeconds: 1 });
+    else await dispatchInbox(env, inboxId);
   } catch {
     /* D1-backed dispatch remains recoverable by Cron. */
   }
@@ -90,5 +92,6 @@ export async function dispatchInbox(env: Env, inboxId: string) {
     lease,
   ).run();
   await signalJobs(env, jobs);
-  if (offset < events.length) await notifyInbox(env, inbox.id);
+  if (offset < events.length && env.INGEST_QUEUE)
+    await notifyInbox(env, inbox.id);
 }

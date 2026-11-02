@@ -129,7 +129,7 @@ Sign in at the CRM URL. Add Admin/Agent members in Settings. Use unique initial 
 
 ## 4. Optional Queues — recommended for timely ingestion
 
-The default works with D1 and Cron only. It dispatches at most three inbox events and processes one lead/history job per 10-minute tick. Each history page contains at most five leads. This is intentionally conservative for free-plan invocation limits, and is suitable only for low volume; it is **not instant delivery**. A sustained backlog requires Queues or a deliberately reviewed scheduling/throughput change.
+The default works with D1, immediate webhook waitUntil processing and five-minute Cron reconciliation, without Queues. Incoming signed events are durably stored before acknowledgement; bounded immediate processing retrieves a lead in the background. Cron recovers pending/leased work and missed lead notifications independently of browser sessions. Ten-record history pages and bounded per-tick work limit invocation cost; large backlogs require further ticks or optional Queues. Hourly subscription checks verify app/Page webhook configuration. See [AUTOMATIC-SYNC-AUDIT.md](AUTOMATIC-SYNC-AUDIT.md) for exact limits, diagnostics and test steps.
 
 Create queues if they are available for your account:
 
