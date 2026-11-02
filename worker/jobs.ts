@@ -72,7 +72,7 @@ export async function signalJobs(env: Env, ids: string[], delaySeconds = 0) {
     } catch {
       if (!delaySeconds && !usedFallback) {
         usedFallback = true;
-        await processJob(env, jid);
+        await processJob({ ...env, INGEST_QUEUE: undefined }, jid);
       }
       /* Remaining D1 jobs are recovered by Cron. */
     }
@@ -242,6 +242,16 @@ export async function processJob(env: Env, jobId: string) {
     t,
   ).first<Job>();
   if (!job) return;
+  if (job.attempts > 8) {
+    await statement(
+      env,
+      "UPDATE sync_jobs SET status='dead',error_code='runtime_interrupted',last_error='This task was interrupted repeatedly. Review and replay it after checking runtime diagnostics.',lease_token=NULL,lease_until=NULL,updated_at=? WHERE id=? AND lease_token=?",
+      now(),
+      job.id,
+      lease,
+    ).run();
+    return;
+  }
   try {
     const page = await one<{
       token_encrypted: string;
@@ -291,48 +301,43 @@ export async function processJob(env: Env, jobId: string) {
         questionsJson: form.questions_json,
       });
     } else {
-      const result = await fetchLeads<GraphList<MetaLead>>(
-        env,
-        `${job.form_id}/leads`,
-        token,
-        {
-          fields: leadFields,
-          limit: "10",
-          ...(job.since_at
-            ? {
-                filtering: JSON.stringify([
-                  {
-                    field: "time_created",
-                    operator: "GREATER_THAN",
-                    value: Math.floor(Date.parse(job.since_at) / 1000),
-                  },
-                ]),
-              }
-            : {}),
-          ...(job.cursor ? { after: job.cursor } : {}),
-        },
-      );
+      const params = {
+        limit: env.INGEST_QUEUE ? "25" : "2",
+        ...(job.since_at
+          ? {
+              filtering: JSON.stringify([
+                {
+                  field: "time_created",
+                  operator: "GREATER_THAN",
+                  value: Math.floor(Date.parse(job.since_at) / 1000),
+                },
+              ]),
+            }
+          : {}),
+        ...(job.cursor ? { after: job.cursor } : {}),
+      };
+      const result = env.INGEST_QUEUE
+        ? await graph<GraphList<MetaLead>>(env, `${job.form_id}/leads`, token, {
+            ...params,
+            fields: "id,created_time,form_id",
+          })
+        : await fetchLeads<GraphList<MetaLead>>(
+            env,
+            `${job.form_id}/leads`,
+            token,
+            params,
+          );
       if (!Array.isArray(result.data))
         throw new GraphError("invalid_page", true);
-      for (const data of result.data) {
-        try {
-          await saveLead(
-            env,
-            job.workspace_id,
-            job.page_id,
-            job.form_id!,
-            data,
-            { id: job.id, lease, questionsJson: form.questions_json },
-          );
-        } catch (error) {
+      if (env.INGEST_QUEUE) {
+        const inserts: D1PreparedStatement[] = [];
+        for (const data of result.data) {
           if (
-            !(error instanceof GraphError) ||
-            error.transient ||
-            !/^\d+$/.test(data?.id || "")
+            !/^\d+$/.test(data.id) ||
+            (data.form_id && data.form_id !== job.form_id)
           )
-            throw error;
-          // A malformed submission must not block every healthy submission on this form.
-          const failed = enqueueStatement(
+            throw new GraphError("invalid_lead_response", false);
+          const child = enqueueStatement(
             env,
             job.workspace_id,
             job.page_id,
@@ -341,20 +346,70 @@ export async function processJob(env: Env, jobId: string) {
             "lead",
             `lead:${job.page_id}:${data.id}`,
           );
-          await env.DB.batch([
-            failed.statement,
+          inserts.push(
+            child.statement,
             statement(
               env,
-              "UPDATE sync_jobs SET status='dead',error_code=?,last_error=?,updated_at=? WHERE workspace_id=? AND dedupe_key=? AND status NOT IN ('running','complete')",
-              error.code,
-              error.message,
-              now(),
+              "UPDATE sync_jobs SET parent_job_id=COALESCE(parent_job_id,?) WHERE workspace_id=? AND dedupe_key=? AND status='pending'",
+              job.id,
               job.workspace_id,
               `lead:${job.page_id}:${data.id}`,
             ),
-          ]);
+          );
         }
-      }
+        if (inserts.length) await env.DB.batch(inserts);
+        const children = await rows<{ id: string }>(
+          env,
+          "SELECT id FROM sync_jobs WHERE workspace_id=? AND parent_job_id=? AND status='pending' ORDER BY next_run_at LIMIT 25",
+          job.workspace_id,
+          job.id,
+        );
+        await signalJobs(
+          env,
+          children.map((child) => child.id),
+        );
+      } else
+        for (const data of result.data) {
+          try {
+            await saveLead(
+              env,
+              job.workspace_id,
+              job.page_id,
+              job.form_id!,
+              data,
+              { id: job.id, lease, questionsJson: form.questions_json },
+            );
+          } catch (error) {
+            if (
+              !(error instanceof GraphError) ||
+              error.transient ||
+              !/^\d+$/.test(data?.id || "")
+            )
+              throw error;
+            // A malformed submission must not block every healthy submission on this form.
+            const failed = enqueueStatement(
+              env,
+              job.workspace_id,
+              job.page_id,
+              job.form_id!,
+              data.id,
+              "lead",
+              `lead:${job.page_id}:${data.id}`,
+            );
+            await env.DB.batch([
+              failed.statement,
+              statement(
+                env,
+                "UPDATE sync_jobs SET status='dead',error_code=?,last_error=?,updated_at=? WHERE workspace_id=? AND dedupe_key=? AND status NOT IN ('running','complete')",
+                error.code,
+                error.message,
+                now(),
+                job.workspace_id,
+                `lead:${job.page_id}:${data.id}`,
+              ),
+            ]);
+          }
+        }
       if (result.paging?.next) {
         next = result.paging.cursors?.after || null;
         if (!next || next === job.cursor)

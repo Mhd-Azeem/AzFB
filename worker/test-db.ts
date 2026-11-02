@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import type { Env } from "./types";
-export function testDatabase(through = 7) {
+export function testDatabase(through = 8) {
   const sqlite = new DatabaseSync(":memory:");
   sqlite.exec("PRAGMA foreign_keys=ON");
   const migrate = (file: string) =>
@@ -16,6 +16,7 @@ export function testDatabase(through = 7) {
     "0005_session_rotation.sql",
     "0006_meta_accounts.sql",
     "0007_sync_health.sql",
+    "0008_ingestion_fanout.sql",
   ].slice(0, through))
     migrate(file);
   function prep(sql: string, args: unknown[] = []) {

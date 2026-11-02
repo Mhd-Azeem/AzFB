@@ -129,7 +129,7 @@ Sign in at the CRM URL. Add Admin/Agent members in Settings. Use unique initial 
 
 ## 4. Optional Queues — recommended for timely ingestion
 
-The default works with D1, immediate webhook waitUntil processing and five-minute Cron reconciliation, without Queues. Incoming signed events are durably stored before acknowledgement; bounded immediate processing retrieves a lead in the background. Cron recovers pending/leased work and missed lead notifications independently of browser sessions. Ten-record history pages and bounded per-tick work limit invocation cost; large backlogs require further ticks or optional Queues. Hourly subscription checks verify app/Page webhook configuration. See [AUTOMATIC-SYNC-AUDIT.md](AUTOMATIC-SYNC-AUDIT.md) for exact limits, diagnostics and test steps.
+The local fallback works with D1, immediate webhook waitUntil processing and five-minute Cron reconciliation, without Queues. Incoming signed events are durably stored before acknowledgement; bounded immediate processing retrieves a lead in the background. Cron recovers pending/leased work and missed lead notifications independently of browser sessions. Production binds the free az-leads-ingestion Queue with single-message, single-concurrency consumption. History discovers up to 25 IDs and schedules one lead per message; the no-Queue fallback requests two records per page. Bounded work limits invocation cost; large backlogs require further ticks or optional Queues. Hourly subscription checks verify app/Page webhook configuration. See [AUTOMATIC-SYNC-AUDIT.md](AUTOMATIC-SYNC-AUDIT.md) for exact limits, diagnostics and test steps.
 
 Create queues if they are available for your account:
 

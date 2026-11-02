@@ -47,7 +47,10 @@
       "triggers": {
         "crons": ["*/5 * * * *", "7 * * * *"],
       },
-      // Optional queues configuration is documented in docs/DEPLOYMENT.md.
+      "queues": {
+        "producers": [{"binding":"INGEST_QUEUE","queue":"az-leads-ingestion"}],
+        "consumers": [{"queue":"az-leads-ingestion","max_batch_size":1,"max_batch_timeout":1,"max_retries":5,"retry_delay":60,"max_concurrency":1}]
+      },
     },
   },
 }

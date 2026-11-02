@@ -1223,6 +1223,156 @@ describe("Meta webhook and ingestion pipeline", () => {
       ))!.status,
     ).toBe("dead");
   });
+  it("bounds a multi-form scheduled invocation within the free-plan query budget", async () => {
+    await provision();
+    const wid = (await one<{ id: string }>(env, "SELECT id FROM workspaces"))!
+      .id;
+    for (const form of ["222", "223", "224", "225"])
+      await seed(wid, "111", form);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input) => {
+        const form = new URL(String(input)).pathname.match(/(\d+)\/leads$/)![1];
+        return new Response(
+          JSON.stringify({
+            data: Array.from({ length: 10 }, (_, i) => ({
+              ...fixture,
+              id: String(Number(form) * 100 + i),
+              form_id: form,
+              field_data: Array.from({ length: 20 }, (_, q) => ({
+                name: `question_${q}`,
+                values: ["custom"],
+              })),
+            })),
+          }),
+        );
+      }),
+    );
+    let calls = 0;
+    function wrap(statement: D1PreparedStatement): D1PreparedStatement {
+      return new Proxy(statement, {
+        get(target, property) {
+          const value = Reflect.get(target, property);
+          if (property === "bind")
+            return (...args: unknown[]) => wrap(target.bind(...args));
+          if (["first", "all", "run", "raw"].includes(String(property)))
+            return (...args: unknown[]) => {
+              calls++;
+              return value.apply(target, args);
+            };
+          return value;
+        },
+      });
+    }
+    const real = env.DB;
+    env.DB = new Proxy(real, {
+      get(target, property) {
+        if (property === "prepare")
+          return (sql: string) => wrap(target.prepare(sql));
+        if (property === "batch")
+          return (statements: D1PreparedStatement[]) => {
+            calls++;
+            return target.batch(statements);
+          };
+        return Reflect.get(target, property);
+      },
+    });
+    await scheduledSync(env);
+    expect(calls).toBeLessThanOrEqual(50);
+    env.DB = real;
+    expect(await rows(env, "SELECT id FROM leads")).toHaveLength(20);
+  });
+  it("fans out history into one-lead Queue tasks without sending customer data in messages", async () => {
+    await provision();
+    const session = await login();
+    const wid = (await one<{ id: string }>(env, "SELECT id FROM workspaces"))!
+      .id;
+    await seed(wid);
+    const messages: { jobId?: string }[] = [];
+    env.INGEST_QUEUE = {
+      send: vi.fn(async (message: { jobId?: string }) => {
+        messages.push(message);
+      }),
+    } as unknown as NonNullable<Env["INGEST_QUEUE"]>;
+    const history = enqueueStatement(
+      env,
+      wid,
+      "111",
+      "222",
+      null,
+      "history",
+      "history:222",
+    );
+    await history.statement.run();
+    const fetch = vi.fn(async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/222/leads")) {
+        expect(url.searchParams.get("fields")).toBe("id,created_time,form_id");
+        return new Response(
+          JSON.stringify({
+            data: Array.from({ length: 5 }, (_, i) => ({
+              id: String(950 + i),
+              form_id: "222",
+              created_time: fixture.created_time,
+            })),
+          }),
+        );
+      }
+      return new Response(
+        JSON.stringify({ ...fixture, id: url.pathname.split("/").pop() }),
+      );
+    });
+    vi.stubGlobal("fetch", fetch);
+    await processJob(env, history.id);
+    expect(messages).toHaveLength(5);
+    expect(await rows(env, "SELECT id FROM leads")).toHaveLength(0);
+    expect(JSON.stringify(messages)).not.toContain("fixture@example.com");
+    expect(JSON.stringify(messages)).not.toContain("field_data");
+    for (const message of messages) await processJob(env, message.jobId!);
+    expect(await rows(env, "SELECT id FROM leads")).toHaveLength(5);
+    const jobs = (await (
+      await req("/meta/jobs", "GET", undefined, session)
+    ).json()) as { data: { id: string; imported: number }[] };
+    expect(jobs.data.find((j) => j.id === history.id)!.imported).toBe(5);
+    await statement(
+      env,
+      "UPDATE sync_jobs SET status='pending',next_run_at=? WHERE id=?",
+      new Date(0).toISOString(),
+      history.id,
+    ).run();
+    await processJob(env, history.id);
+    expect(messages).toHaveLength(5);
+    expect(await rows(env, "SELECT id FROM leads")).toHaveLength(5);
+  });
+  it("dead-letters repeatedly interrupted runtime leases instead of retrying forever", async () => {
+    await provision();
+    const wid = (await one<{ id: string }>(env, "SELECT id FROM workspaces"))!
+      .id;
+    await seed(wid);
+    const job = enqueueStatement(
+      env,
+      wid,
+      "111",
+      "222",
+      "333",
+      "lead",
+      "lead:111:333",
+    );
+    await job.statement.run();
+    await statement(
+      env,
+      "UPDATE sync_jobs SET attempts=8 WHERE id=?",
+      job.id,
+    ).run();
+    await processJob(env, job.id);
+    const result = (await one<{ status: string; error_code: string }>(
+      env,
+      "SELECT status,error_code FROM sync_jobs WHERE id=?",
+      job.id,
+    ))!;
+    expect(result.status).toBe("dead");
+    expect(result.error_code).toBe("runtime_interrupted");
+  });
   it("isolates malformed submissions and continues history pagination", async () => {
     await provision();
     const wid = (await one<{ id: string }>(env, "SELECT id FROM workspaces"))!

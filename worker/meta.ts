@@ -511,7 +511,7 @@ metaRoutes.get("/jobs", async (c) => {
     ok: true,
     data: await rows(
       c.env,
-      "SELECT id,page_id,form_id,lead_id,kind,status,attempts,imported,next_run_at,last_error,error_code,updated_at FROM sync_jobs WHERE workspace_id=? ORDER BY updated_at DESC LIMIT 100",
+      "SELECT j.id,j.page_id,j.form_id,j.lead_id,j.kind,j.status,j.attempts,j.imported+COALESCE((SELECT SUM(child.imported) FROM sync_jobs child WHERE child.workspace_id=j.workspace_id AND child.parent_job_id=j.id),0) AS imported,j.next_run_at,j.last_error,j.error_code,j.updated_at FROM sync_jobs j WHERE j.workspace_id=? ORDER BY j.updated_at DESC LIMIT 100",
       a.workspaceId,
     ),
   });
